@@ -35,13 +35,27 @@ import sys
 import time
 from pathlib import Path
 
+import shutil
+
+
+def _resolve_bin(env_key, names, fallback):
+    """环境变量 > ~/.local/bin > PATH。别人用发行版包安装也能跑。"""
+    import os
+    cands = [os.environ.get(env_key), str(Path.home() / ".local/bin" / names[0])]
+    cands += [shutil.which(n) for n in names]
+    for c in cands:
+        if c and os.access(c, os.X_OK):
+            return c
+    return fallback
+
+
 import gi
 
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, GLib  # noqa: E402
 
 HOME = Path.home()
-ADB = str(HOME / ".local/bin/adb")
+ADB = _resolve_bin("ADB", ["adb"], "adb")
 CONFIG = HOME / ".local/opt/phonesync/config.json"
 
 
@@ -157,6 +171,15 @@ def main():
     if mode == "off":
         log("pushclip_mode=off，不启动")
         return 0
+
+    # 这个方向靠 xdotool 给 scrcpy 窗口发按键，Wayland 不允许别的程序往窗口注入按键
+    if os.environ.get("XDG_SESSION_TYPE", "") == "wayland":
+        log("⚠ Wayland 会话：xdotool 无法向窗口注入按键，"
+            "「电脑→手机剪贴板」本会话不可用。")
+        log("  其它功能（手机→电脑、照片、短信、通知）不受影响。")
+        log("  需要这个功能请改用 X11 会话登录（登录界面右下角齿轮选 Ubuntu on Xorg）。")
+        return 0
+
     Gtk.init([])
     Pusher(mode)
     hide_scrcpy_window()

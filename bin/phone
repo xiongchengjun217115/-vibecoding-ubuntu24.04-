@@ -2,8 +2,16 @@
 # phone — 手机↔电脑 工具箱（纯 ADB，无需 root，手机不装 App）
 set -uo pipefail
 
-ADB="$HOME/.local/bin/adb"
-SCRCPY="$HOME/.local/bin/scrcpy"
+# 解析依赖路径：环境变量 > ~/.local/bin > PATH
+# （install.sh 会把找到的 scrcpy/adb 软链到 ~/.local/bin，但不强求必须在那）
+_pick_bin() {
+  for c in "$@"; do
+    [ -n "$c" ] && [ -x "$c" ] && { printf '%s' "$c"; return 0; }
+  done
+  return 1
+}
+ADB="$(_pick_bin "${ADB:-}" "$HOME/.local/bin/adb" "$(command -v adb 2>/dev/null)")" || ADB="adb"
+SCRCPY="$(_pick_bin "${SCRCPY:-}" "$HOME/.local/bin/scrcpy" "$(command -v scrcpy 2>/dev/null)")" || SCRCPY="scrcpy"
 SYNC="$HOME/.local/opt/phonesync/phone_sync.py"
 DIR="$HOME/.local/opt/phonesync"
 SYNC_PID="$DIR/sync.pid"
@@ -201,7 +209,13 @@ PY
     out="$HOME/Pictures/手机同步/$(date +%Y%m%d-%H%M%S)-$(basename "$p")"
     mkdir -p "$(dirname "$out")"
     "$ADB" exec-out "cat '$p'" > "$out" && echo "✓ 已保存 $out"
-    DISPLAY="${DISPLAY:-:1}" python3 - "$out" <<'PY'
+    # DISPLAY 兜底：systemd/ssh 环境里可能没有，自己找一个可用的 X socket
+    if [ -z "${DISPLAY:-}" ] || [ ! -e "/tmp/.X11-unix/X${DISPLAY#:}" ]; then
+      for _s in /tmp/.X11-unix/X*; do
+        [ -e "$_s" ] && { export DISPLAY=":${_s##*/X}"; break; }
+      done
+    fi
+    python3 - "$out" <<'PY'
 import sys, gi
 gi.require_version("Gtk","3.0"); gi.require_version("GdkPixbuf","2.0")
 from gi.repository import Gtk, Gdk, GdkPixbuf, GLib

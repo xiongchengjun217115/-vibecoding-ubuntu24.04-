@@ -19,6 +19,20 @@ import threading
 import time
 from pathlib import Path
 
+import shutil
+
+
+def _resolve_bin(env_key, names, fallback):
+    """环境变量 > ~/.local/bin > PATH。别人用发行版包安装也能跑。"""
+    import os
+    cands = [os.environ.get(env_key), str(Path.home() / ".local/bin" / names[0])]
+    cands += [shutil.which(n) for n in names]
+    for c in cands:
+        if c and os.access(c, os.X_OK):
+            return c
+    return fallback
+
+
 import gi
 
 gi.require_version("Gtk", "4.0")
@@ -28,7 +42,7 @@ from gi.repository import Adw, Gdk, GLib, Gtk, Pango  # noqa: E402
 APP_ID = "io.github.phoneconnect.PhoneConnect"
 
 HOME = Path.home()
-ADB = str(HOME / ".local/bin/adb")
+ADB = _resolve_bin("ADB", ["adb"], "adb")
 DIR = HOME / ".local/opt/phonesync"
 EVENTS = DIR / "events.jsonl"
 WIRELESS_ENV = DIR / "wireless.env"

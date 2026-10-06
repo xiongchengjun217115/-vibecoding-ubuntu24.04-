@@ -17,7 +17,15 @@ set -uo pipefail
 FORCE=0
 [ "${1:-}" = "--force" ] && FORCE=1
 
-ADB="${ADB:-$HOME/.local/bin/adb}"
+# 解析依赖路径：环境变量 > ~/.local/bin > PATH
+# （install.sh 会把找到的 scrcpy/adb 软链到 ~/.local/bin，但不强求必须在那）
+_pick_bin() {
+  for c in "$@"; do
+    [ -n "$c" ] && [ -x "$c" ] && { printf '%s' "$c"; return 0; }
+  done
+  return 1
+}
+ADB="$(_pick_bin "${ADB:-}" "$HOME/.local/bin/adb" "$(command -v adb 2>/dev/null)")" || ADB="adb"
 DIR="$HOME/.local/opt/phonesync"
 STATE="$DIR/wireless.env"
 STAMP="$DIR/.last_scan"

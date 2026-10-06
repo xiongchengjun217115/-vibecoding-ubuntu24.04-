@@ -19,7 +19,21 @@ import sys
 import time
 from pathlib import Path
 
-ADB = str(Path.home() / ".local/bin/adb")
+import shutil
+
+
+def _resolve_bin(env_key, names, fallback):
+    """环境变量 > ~/.local/bin > PATH。别人用发行版包安装也能跑。"""
+    import os
+    cands = [os.environ.get(env_key), str(Path.home() / ".local/bin" / names[0])]
+    cands += [shutil.which(n) for n in names]
+    for c in cands:
+        if c and os.access(c, os.X_OK):
+            return c
+    return fallback
+
+
+ADB = _resolve_bin("ADB", ["adb"], "adb")
 
 
 async def probe(ip, port, sem, timeout):

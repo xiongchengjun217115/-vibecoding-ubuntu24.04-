@@ -7,7 +7,15 @@
 #   · 全程静默：手机不在时 0 输出、0 日志垃圾
 set -uo pipefail
 
-ADB="${ADB:-$HOME/.local/bin/adb}"
+# 解析依赖路径：环境变量 > ~/.local/bin > PATH
+# （install.sh 会把找到的 scrcpy/adb 软链到 ~/.local/bin，但不强求必须在那）
+_pick_bin() {
+  for c in "$@"; do
+    [ -n "$c" ] && [ -x "$c" ] && { printf '%s' "$c"; return 0; }
+  done
+  return 1
+}
+ADB="$(_pick_bin "${ADB:-}" "$HOME/.local/bin/adb" "$(command -v adb 2>/dev/null)")" || ADB="adb"
 STATE="$HOME/.local/opt/phonesync/wireless.env"
 
 pick() {

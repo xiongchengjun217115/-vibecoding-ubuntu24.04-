@@ -26,12 +26,26 @@ import time
 import json
 from pathlib import Path
 
+import shutil
+
+
+def _resolve_bin(env_key, names, fallback):
+    """环境变量 > ~/.local/bin > PATH。别人用发行版包安装也能跑。"""
+    import os
+    cands = [os.environ.get(env_key), str(Path.home() / ".local/bin" / names[0])]
+    cands += [shutil.which(n) for n in names]
+    for c in cands:
+        if c and os.access(c, os.X_OK):
+            return c
+    return fallback
+
+
 try:
     from gi.repository import GLib          # 事件回调要回到主线程
 except Exception:                            # --test / --once 场景没有 GTK 也能跑
     GLib = None
 
-ADB = os.environ.get("ADB", str(Path.home() / ".local/bin/adb"))
+ADB = _resolve_bin("ADB", ["adb"], "adb")
 SAVE_DIR = Path.home() / "Pictures" / "手机同步"
 STATE_FILE = Path.home() / ".local/opt/phonesync/state.json"
 CONFIG = Path.home() / ".local/opt/phonesync/config.json"
