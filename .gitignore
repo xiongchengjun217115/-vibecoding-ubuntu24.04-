@@ -1,0 +1,21 @@
+# ── 运行时数据：属于个人隐私，绝对不要提交 ──
+*.log
+*.jsonl
+state.json
+config.json
+wireless.env
+.last_scan
+.scan_count
+*.pid
+
+# 本机装出来的 systemd 单元 / 桌面项（仓库里只放模板）
+*.service.local
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+
+# ── 编辑器 ──
+.vscode/
+.idea/
+*.swp

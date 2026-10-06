@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# phone-daemon-run — 给 systemd 用户服务用的小包装：
+# 确保 DISPLAY / XAUTHORITY 存在（systemd 服务环境里可能缺失），然后 exec 真正的程序
+set -uo pipefail
+
+uid="$(id -u)"
+
+# DISPLAY 校验：变量为空、或对应 socket 不存在，就自己找一个可用的 X display
+if [ -z "${DISPLAY:-}" ] || [ ! -e "/tmp/.X11-unix/X${DISPLAY#:}" ]; then
+  for sock in /tmp/.X11-unix/X*; do
+    [ -e "$sock" ] || continue
+    export DISPLAY=":${sock##*/X}"
+    break
+  done
+fi
+
+# XAUTHORITY 兜底
+if [ -z "${XAUTHORITY:-}" ] || [ ! -r "${XAUTHORITY:-/nonexistent}" ]; then
+  for cand in "/run/user/$uid/gdm/Xauthority" "$HOME/.Xauthority"; do
+    if [ -r "$cand" ]; then export XAUTHORITY="$cand"; break; fi
+  done
+fi
+
+# DBUS 会话总线兜底（notify-send 需要）
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+  export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus"
+fi
+
+# PATH 兜底，保证能找到打包的 scrcpy / adb
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+
+exec "$@"

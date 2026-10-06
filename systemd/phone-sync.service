@@ -1,0 +1,18 @@
+[Unit]
+Description=手机通知/短信/拍照→剪贴板 同步
+After=graphical-session.target
+PartOf=graphical-session.target
+# 手机没插时脚本会静默等待（不退出），这里只作为兜底
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/.local/bin/phone-daemon-run /usr/bin/python3 %h/.local/opt/phonesync/phone_sync.py
+Restart=always
+RestartSec=5
+StandardOutput=append:%h/.local/opt/phonesync/sync.log
+StandardError=append:%h/.local/opt/phonesync/sync.log
+
+[Install]
+WantedBy=graphical-session.target

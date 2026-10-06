@@ -1,0 +1,332 @@
+#!/usr/bin/env bash
+# phone — 手机↔电脑 工具箱（纯 ADB，无需 root，手机不装 App）
+set -uo pipefail
+
+ADB="$HOME/.local/bin/adb"
+SCRCPY="$HOME/.local/bin/scrcpy"
+SYNC="$HOME/.local/opt/phonesync/phone_sync.py"
+DIR="$HOME/.local/opt/phonesync"
+SYNC_PID="$DIR/sync.pid"
+CLIP_PID="$DIR/clip.pid"
+SYNC_LOG="$DIR/sync.log"
+CLIP_LOG="$DIR/clip.log"
+
+usage() {
+  cat <<'EOF'
+phone — 手机 ↔ 电脑 工具箱
+
+  后台服务（已注册 systemd 用户服务：登录后自动运行，崩溃/拔插自动恢复）
+    phone start      启动剪贴板同步 + 通知/短信/拍照同步
+    phone stop       停止全部后台服务
+    phone log        实时查看同步日志
+
+  前台使用
+    phone status     查看连接状态与运行中的服务
+    phone screen     打开投屏窗口（鼠标键盘可反控手机）
+    phone photo      手动把手机最新一张照片拉到剪贴板
+    phone clipboard  前台跑剪贴板同步（Ctrl+C 退出）
+
+  调试
+    phone test       打印设备/短信/通知/相册当前状态
+    phone wireless   用 USB 切成 TCP 5555 固定端口模式
+    phone pair       无线调试配对（不需要 USB 线）
+    phone use        记录无线调试的连接地址
+    phone find       扫描手机 IP 自动找无线调试端口（重启后端口变了用这个）
+    phone autoconnect 触发一次智能重连
+    phone clipmode   控制手机照片要不要自动进电脑剪贴板
+    phone pushclip   控制电脑→手机剪贴板推送（safe/always/off）
+    phone usb        切回 USB 模式
+EOF
+}
+
+need_device() {
+  if ! "$ADB" devices | awk 'NR>1 && $2=="device"' | grep -q .; then
+    echo "✗ 没有已授权的设备。插好 USB，手机上点『允许 USB 调试』后再试。" >&2
+    "$ADB" devices -l >&2
+    exit 1
+  fi
+}
+
+is_running() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
+
+# 优先无线（ip:port），其次 USB —— 与 wait-for-adb / phone_sync 保持一致
+pick_serial() {
+  "$ADB" devices 2>/dev/null | awk 'NR>1 && $2=="device"{print $1}' |
+    awk '/:/{tcp=$0} !/:/{usb=$0} END{ if (tcp) print tcp; else if (usb) print usb }'
+}
+
+# 是否已装好 systemd 用户服务（装了就优先用它：开机自启 + 崩溃自动重启）
+use_systemd() {
+  [ -f "$HOME/.config/systemd/user/phone-clip.service" ] || return 1
+  systemctl --user cat phone-clip.service >/dev/null 2>&1
+}
+
+start_one() {   # $1=名称 $2=pidfile $3=logfile $4...=命令
+  local name="$1" pidf="$2" logf="$3"; shift 3
+  if is_running "$pidf"; then
+    echo "  · $name 已在运行 (pid $(cat "$pidf"))"
+    return 0
+  fi
+  setsid nohup "$@" >"$logf" 2>&1 </dev/null &
+  echo $! > "$pidf"
+  sleep 1
+  if is_running "$pidf"; then
+    echo "  ✓ $name 已启动 (pid $(cat "$pidf"))  → 日志 $logf"
+  else
+    echo "  ✗ $name 启动失败，日志尾部："
+    tail -5 "$logf" 2>/dev/null | sed 's/^/      /'
+  fi
+}
+
+stop_one() {    # $1=名称 $2=pidfile
+  local name="$1" pidf="$2"
+  if is_running "$pidf"; then
+    kill "$(cat "$pidf")" 2>/dev/null
+    sleep 1
+    kill -9 "$(cat "$pidf")" 2>/dev/null
+    echo "  ✓ $name 已停止"
+  else
+    echo "  · $name 未在运行"
+  fi
+  rm -f "$pidf"
+}
+
+case "${1:-}" in
+  start)
+    if use_systemd; then
+      systemctl --user start phone-clip.service phone-sync.service
+      sleep 2
+      echo "启动后台服务（systemd 管理）："
+      printf '  %-22s %s\n' "剪贴板同步" "$(systemctl --user is-active phone-clip.service)"
+      printf '  %-22s %s\n' "通知/短信/拍照同步" "$(systemctl --user is-active phone-sync.service)"
+    else
+      need_device
+      echo "启动后台服务（手工方式）："
+      start_one "剪贴板同步" "$CLIP_PID" "$CLIP_LOG" \
+        "$SCRCPY" --no-window --no-video --no-audio
+      start_one "通知/短信/拍照同步" "$SYNC_PID" "$SYNC_LOG" \
+        python3 "$SYNC"
+    fi
+    echo
+    echo "照片会自动存到 ~/Pictures/手机同步/ 并复制进剪贴板"
+    ;;
+  stop)
+    if use_systemd; then
+      systemctl --user stop phone-clip.service phone-sync.service
+      echo "  ✓ 已停止（下次登录/开机仍会自动启动）"
+      echo "    要彻底关掉自启: systemctl --user disable phone-clip phone-sync"
+    else
+      echo "停止后台服务："
+      stop_one "剪贴板同步" "$CLIP_PID"
+      stop_one "通知/短信/拍照同步" "$SYNC_PID"
+    fi
+    ;;
+  log)
+    touch "$SYNC_LOG" "$CLIP_LOG"
+    echo "── 同步日志 (Ctrl+C 退出) ──"
+    tail -f "$SYNC_LOG" "$CLIP_LOG"
+    ;;
+  status)
+    echo "── adb 设备 ──"; "$ADB" devices -l
+    serial="$(pick_serial)"
+    echo; echo "── 当前使用的通道 ──"
+    if [ -n "$serial" ]; then
+      case "$serial" in
+        *:*) echo "  ✓ 无线  $serial" ;;
+        *)   echo "  ✓ USB   $serial" ;;
+      esac
+    else
+      echo "  · 无可用设备"
+      if [ -f "$DIR/wireless.env" ]; then
+        # shellcheck disable=SC1090
+        . "$DIR/wireless.env" 2>/dev/null
+        if [ -n "${WIRELESS_IP:-}" ]; then
+          if ping -c 1 -W 2 "$WIRELESS_IP" >/dev/null 2>&1; then
+            if timeout 3 bash -c "cat < /dev/null > /dev/tcp/$WIRELESS_IP/5555" 2>/dev/null; then
+              echo "  ⚠ 手机 $WIRELESS_IP 在线、5555 端口开放，但未建立连接 → 试 phone wireless"
+            else
+              echo "  ⚠ 手机 $WIRELESS_IP 在线，但调试服务没在跑"
+              echo "     → 请在手机上打开「开发者选项 → USB 调试」或「无线调试」"
+              echo "       （两个都不开的话，手机没有任何端口在监听，连不上）"
+            fi
+          else
+            echo "  · 手机 $WIRELESS_IP 不在网络上"
+          fi
+        fi
+      fi
+    fi
+    if [ -f "$DIR/wireless.env" ]; then
+      # shellcheck disable=SC1090
+      . "$DIR/wireless.env" 2>/dev/null
+      echo "  已记录无线 IP: ${WIRELESS_IP:-（无）}"
+    else
+      echo "  尚未配置无线（运行 phone wireless）"
+    fi
+    echo; echo "── 设备信息 ──"
+    if [ -n "$serial" ]; then
+      "$ADB" -s "$serial" shell 'getprop ro.product.brand; getprop ro.product.model; getprop ro.build.version.release' 2>/dev/null | tr -d '\r'
+    fi
+    echo; echo "── 后台服务 ──"
+    if use_systemd; then
+      systemctl --user list-units 'phone-*' --no-pager --no-legend 2>/dev/null | sed 's/^/  /'
+      echo "  开机自启: clip=$(systemctl --user is-enabled phone-clip.service 2>&1) sync=$(systemctl --user is-enabled phone-sync.service 2>&1)"
+    else
+      is_running "$CLIP_PID" && echo "  ✓ 剪贴板同步 (pid $(cat "$CLIP_PID"))" || echo "  · 剪贴板同步 未运行"
+      is_running "$SYNC_PID" && echo "  ✓ 通知/短信/拍照同步 (pid $(cat "$SYNC_PID"))" || echo "  · 通知/短信/拍照同步 未运行"
+    fi
+    ;;
+  test)
+    need_device
+    exec python3 "$SYNC" --test
+    ;;
+  clipboard)
+    need_device
+    exec "$SCRCPY" --no-window --no-video --no-audio
+    ;;
+  screen)
+    need_device
+    exec "$SCRCPY" --max-size=1024 --max-fps=60 --keyboard=uhid --mouse=uhid
+    ;;
+  photo)
+    need_device
+    p=$(python3 - <<'PY'
+import os, importlib.util
+spec = importlib.util.spec_from_file_location("ps", os.path.expanduser("~/.local/opt/phonesync/phone_sync.py"))
+ps = importlib.util.module_from_spec(spec); spec.loader.exec_module(ps)
+ltp = ps.latest_photo()
+print(ltp[1] if ltp else "")
+PY
+)
+    [ -z "$p" ] && { echo "✗ 拿不到照片路径"; exit 1; }
+    out="$HOME/Pictures/手机同步/$(date +%Y%m%d-%H%M%S)-$(basename "$p")"
+    mkdir -p "$(dirname "$out")"
+    "$ADB" exec-out "cat '$p'" > "$out" && echo "✓ 已保存 $out"
+    DISPLAY="${DISPLAY:-:1}" python3 - "$out" <<'PY'
+import sys, gi
+gi.require_version("Gtk","3.0"); gi.require_version("GdkPixbuf","2.0")
+from gi.repository import Gtk, Gdk, GdkPixbuf, GLib
+pb = GdkPixbuf.Pixbuf.new_from_file(sys.argv[1])
+cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+cb.set_image(pb); cb.store()
+print(f"✓ 已复制到剪贴板 {pb.get_width()}x{pb.get_height()}")
+GLib.timeout_add_seconds(180, lambda: (Gtk.main_quit(), False)[-1])
+Gtk.main()
+PY
+    ;;
+  wireless)
+    need_device
+    ip=$("$ADB" shell 'ip -4 addr show wlan0' 2>/dev/null | tr -d '\r' \
+         | grep -oE 'inet [0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1 | awk '{print $2}')
+    if [ -z "$ip" ]; then
+      echo "✗ 拿不到手机 Wi-Fi IP —— 确认手机已连上 Wi-Fi" >&2
+      exit 1
+    fi
+    echo "手机 Wi-Fi IP: $ip"
+    "$ADB" tcpip 5555
+    sleep 3
+    "$ADB" connect "$ip:5555"
+    sleep 2
+    mkdir -p "$DIR"
+    printf '# 手机无线调试状态 —— 由 `phone wireless` 自动写入，服务启动时读取用于自动重连\nWIRELESS_IP=%s\nWIRELESS_PORT=5555\n' "$ip" > "$DIR/wireless.env"
+    echo "  ✓ 已记录 IP 到 $DIR/wireless.env"
+    ;;
+  pair)
+    # 无线调试配对：全程走 Wi-Fi，不需要 USB 线
+    addr="${2:-}"; code="${3:-}"
+    if [ -z "$addr" ] || [ -z "$code" ]; then
+      echo "用法: phone pair <配对地址> <6位配对码>" >&2
+      echo "例:   phone pair 192.168.1.50:37105 123456" >&2
+      echo "（地址和配对码来自手机「无线调试 → 使用配对码配对设备」弹窗）" >&2
+      exit 1
+    fi
+    "$ADB" pair "$addr" "$code"
+    ;;
+  use)
+    # 记录无线调试的「连接地址」，服务启动时用它自动重连
+    addr="${2:-}"
+    if [ -z "$addr" ]; then
+      echo "用法: phone use <ip:端口>" >&2
+      echo "（端口来自手机「无线调试」主界面上显示的 IP 地址和端口）" >&2
+      exit 1
+    fi
+    host="${addr%%:*}"; port="${addr##*:}"
+    mkdir -p "$DIR"
+    printf '# 手机无线调试地址 —— 由 phone use 写入，服务启动时读取用于自动重连\nWIRELESS_IP=%s\nWIRELESS_PORT=%s\n' \
+      "$host" "$port" > "$DIR/wireless.env"
+    echo "  ✓ 已记录 $host:$port"
+    "$ADB" connect "$addr"
+    sleep 1
+    "$ADB" devices -l | sed 's/^/  /'
+    ;;
+  find)
+    # 扫描手机 IP 自动找无线调试端口（手机重启后端口会变，用这个找回）
+    shift
+    exec python3 "$DIR/find_port.py" "$@"
+    ;;
+  autoconnect)
+    exec "$HOME/.local/bin/phone-autoconnect"
+    ;;
+  clipmode)
+    # 手机照片要不要自动进电脑剪贴板
+    mode="${2:-}"
+    if [ -z "$mode" ]; then
+      cur=$(python3 -c "
+import json,os
+try: print(json.load(open(os.path.expanduser('~/.local/opt/phonesync/config.json'))).get('photo_clip_mode','all'))
+except Exception: print('all')" 2>/dev/null)
+      echo "当前模式: $cur"
+      echo
+      echo "  phone clipmode all      手机照片和截图都自动进剪贴板（默认）"
+      echo "  phone clipmode camera   只有相机拍的照片进剪贴板，截图只保存"
+      echo "  phone clipmode off      照片只保存，都不进剪贴板"
+      exit 0
+    fi
+    case "$mode" in
+      all|camera|off) ;;
+      *) echo "✗ 只支持 all / camera / off" >&2; exit 1 ;;
+    esac
+    python3 -c "
+import json,os,sys
+p=os.path.expanduser('~/.local/opt/phonesync/config.json')
+try: d=json.load(open(p))
+except Exception: d={}
+d['photo_clip_mode']=sys.argv[1]
+os.makedirs(os.path.dirname(p), exist_ok=True)
+json.dump(d, open(p,'w'))" "$mode"
+    systemctl --user restart phone-sync.service 2>/dev/null
+    echo "  ✓ 已设为 '$mode'（服务已重载）"
+    ;;
+  pushclip)
+    # 电脑 → 手机 剪贴板推送（靠 scrcpy 隐藏窗口的 Ctrl+V）
+    mode="${2:-}"
+    if [ -z "$mode" ]; then
+      cur=$(python3 -c "
+import json,os
+try: print(json.load(open(os.path.expanduser('~/.local/opt/phonesync/config.json'))).get('pushclip_mode','safe'))
+except Exception: print('safe')" 2>/dev/null)
+      echo "当前模式: $cur"
+      echo "服务状态: $(systemctl --user is-active phone-push.service 2>/dev/null)"
+      echo
+      echo "  phone pushclip always  无条件推送（默认；粘贴注入已被 display-id=99 丢弃，无副作用）"
+      echo "  phone pushclip safe    额外要求手机息屏/锁屏/无输入框才推（一般用不上）"
+      echo "  phone pushclip off     关闭电脑→手机方向"
+      echo
+      echo "最近记录:"; tail -5 "$DIR/push.log" 2>/dev/null | sed 's/^/  /'
+      exit 0
+    fi
+    case "$mode" in safe|always|off) ;; *) echo "✗ 只支持 safe / always / off" >&2; exit 1 ;; esac
+    python3 -c "
+import json,os,sys
+p=os.path.expanduser('~/.local/opt/phonesync/config.json')
+try: d=json.load(open(p))
+except Exception: d={}
+d['pushclip_mode']=sys.argv[1]
+json.dump(d, open(p,'w'))" "$mode"
+    systemctl --user restart phone-push.service 2>/dev/null
+    echo "  ✓ 已设为 '$mode'（服务已重载）"
+    ;;
+  usb)
+    "$ADB" usb
+    ;;
+  *) usage ;;
+esac

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=手机连接
+GenericName=Phone Connect
+Comment=查看手机连接状态、剪贴板与消息
+Exec=@HOME@/.local/bin/phone-gui
+Icon=phone
+Terminal=false
+Categories=Utility;
+Keywords=phone;adb;clipboard;sms;
+StartupNotify=true

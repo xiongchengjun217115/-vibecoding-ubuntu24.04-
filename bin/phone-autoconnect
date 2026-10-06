@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# phone-autoconnect — 智能无线重连
+#
+# 策略（按代价从低到高，全静默）：
+#   1. 记录地址已连上        → 直接返回
+#   2. 试着 adb connect 一次 → 成功即返回（绝大多数情况到这就够了）
+#   3. 手机 ping 不通        → 放弃（手机不在网络里，扫描没意义）
+#   4. 限流通过 → 扫描端口，找到就更新 wireless.env（应对手机重启后端口变化）
+#
+# 限流：距上次扫描 ≥ SCAN_GAP 秒，且自上次成功连接以来最多扫 SCAN_MAX 次，
+#       避免在手机长期离线时反复扫网。
+#
+# 用法： phone-autoconnect [--force]
+#        --force  跳过限流（GUI 上手动点「重新扫描」时用）
+set -uo pipefail
+
+FORCE=0
+[ "${1:-}" = "--force" ] && FORCE=1
+
+ADB="${ADB:-$HOME/.local/bin/adb}"
+DIR="$HOME/.local/opt/phonesync"
+STATE="$DIR/wireless.env"
+STAMP="$DIR/.last_scan"
+COUNT="$DIR/.scan_count"
+SCAN_GAP=300       # 两次扫描最小间隔（秒）
+SCAN_MAX=3         # 自上次成功连接以来最多扫几次
+
+WIRELESS_IP=""; WIRELESS_PORT="5555"
+[ -f "$STATE" ] && . "$STATE" 2>/dev/null
+WIRELESS_PORT="${WIRELESS_PORT:-5555}"
+[ -n "${WIRELESS_IP:-}" ] || exit 0
+
+addr="$WIRELESS_IP:$WIRELESS_PORT"
+
+connected() {
+  "$ADB" devices 2>/dev/null | awk 'NR>1 && $2=="device"{print $1}' | grep -qx "$addr"
+}
+
+# 1. 已连上 → 清零失败计数
+if connected; then
+  echo 0 > "$COUNT" 2>/dev/null
+  exit 0
+fi
+
+# 2. 先直接试一次
+timeout 8 "$ADB" connect "$addr" >/dev/null 2>&1
+if connected; then
+  echo 0 > "$COUNT" 2>/dev/null
+  exit 0
+fi
+
+# 3. 手机不在网络上就别扫
+ping -c 1 -W 2 "$WIRELESS_IP" >/dev/null 2>&1 || exit 0
+
+# 4. 限流（--force 时跳过，但仍然记录扫描时间）
+if [ "$FORCE" != "1" ]; then
+  n=0; [ -f "$COUNT" ] && n=$(cat "$COUNT" 2>/dev/null || echo 0)
+  [ "$n" -ge "$SCAN_MAX" ] && exit 0
+  now=$(date +%s); last=0
+  [ -f "$STAMP" ] && last=$(cat "$STAMP" 2>/dev/null || echo 0)
+  [ $((now - last)) -lt "$SCAN_GAP" ] && exit 0
+else
+  n=0; [ -f "$COUNT" ] && n=$(cat "$COUNT" 2>/dev/null || echo 0)
+fi
+now=$(date +%s)
+
+echo "$now" > "$STAMP" 2>/dev/null
+echo $((n + 1)) > "$COUNT" 2>/dev/null
+
+# 5. 扫描找新端口（find_port 成功时可能输出「找到 adb 无线调试端口: x」，也可能输出「已连接: x」）
+new=$(timeout 260 python3 "$DIR/find_port.py" --ip "$WIRELESS_IP" --quiet 2>/dev/null \
+      | grep -oE '(找到 adb 无线调试端口|已连接): [0-9.]+:[0-9]+' | head -1 | sed 's/.*://')
+if [ -n "$new" ]; then
+  printf '# 手机无线调试地址 —— 由 phone-autoconnect / phone use 自动维护\nWIRELESS_IP=%s\nWIRELESS_PORT=%s\n' \
+    "$WIRELESS_IP" "$new" > "$STATE"
+  echo 0 > "$COUNT" 2>/dev/null
+  echo "[autoconnect] 端口已自动更新为 $WIRELESS_IP:$new" >&2
+fi
+exit 0

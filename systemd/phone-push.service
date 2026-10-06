@@ -1,0 +1,17 @@
+[Unit]
+Description=电脑剪贴板 → 手机（通过 scrcpy 隐藏窗口）
+After=graphical-session.target phone-clip.service
+PartOf=graphical-session.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/.local/bin/phone-daemon-run /usr/bin/python3 %h/.local/opt/phonesync/phone_pushclip.py
+Restart=always
+RestartSec=5
+StandardOutput=append:%h/.local/opt/phonesync/push.log
+StandardError=append:%h/.local/opt/phonesync/push.log
+
+[Install]
+WantedBy=graphical-session.target

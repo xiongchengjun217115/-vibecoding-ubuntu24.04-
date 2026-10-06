@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# phone-gui — 启动手机连接监控客户端
+exec python3 "$HOME/.local/opt/phonesync/phone_gui.py" "$@"

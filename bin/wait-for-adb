@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# wait-for-adb — 等一台"已授权"的 adb 设备就绪，然后 exec 给定命令
+#
+# 特点：
+#   · 优先无线通道（序列号形如 ip:port），其次 USB —— 避免"more than one device"歧义
+#   · 没有设备时，会尝试用 wireless.env 里记录的 IP 自动 adb connect
+#   · 全程静默：手机不在时 0 输出、0 日志垃圾
+set -uo pipefail
+
+ADB="${ADB:-$HOME/.local/bin/adb}"
+STATE="$HOME/.local/opt/phonesync/wireless.env"
+
+pick() {
+  "$ADB" devices 2>/dev/null | awk 'NR>1 && $2=="device"{print $1}' |
+    awk '/:/{tcp=$0} !/:/{usb=$0} END{ if (tcp) print tcp; else if (usb) print usb }'
+}
+
+try_wireless() {
+  # 交给 phone-autoconnect：先试记录地址，必要时（限流）扫描找新端口
+  [ -x "$HOME/.local/bin/phone-autoconnect" ] || return 0
+  timeout 150 "$HOME/.local/bin/phone-autoconnect" >/dev/null 2>&1
+}
+
+for _ in $(seq 1 100000); do
+  serial="$(pick)"
+  if [ -z "$serial" ]; then
+    try_wireless
+    serial="$(pick)"
+  fi
+  if [ -n "$serial" ]; then
+    export ANDROID_SERIAL="$serial"
+    exec "$@"
+  fi
+  sleep 5
+done
+
+echo "wait-for-adb: 等待超时" >&2
+exit 1

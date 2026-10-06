@@ -1,0 +1,27 @@
+[Unit]
+Description=手机剪贴板同步（scrcpy 双向）
+After=graphical-session.target
+PartOf=graphical-session.target
+# 手机没插时 scrcpy 会立刻退出，需要无限重试，所以关掉启动频率限制
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# 保留一个「移到屏幕外」的窗口：scrcpy 的「电脑→手机」剪贴板同步只绑定在窗口里按
+# Ctrl+V 这个动作上，无窗口模式没有这个入口（phone-pushclip 会往这个窗口发 Ctrl+V）。
+#
+# --display-id=99 是关键：scrcpy 服务端收到 SET_CLIPBOARD 后会先设置剪贴板（我们要的），
+# 再往 getActionDisplayId() 指向的显示器注入一次 PASTE（不想要的副作用）。
+# 指向一个不存在的显示器 99，系统会直接丢弃该按键事件：
+#     I InputDispatcher: Dropping KEY event because there is no focused window ... in display 99
+# 剪贴板照常设置成功，手机界面完全不受影响。
+#
+# --no-video 不产生视频编码开销，但仍然有窗口可接收按键。
+ExecStart=%h/.local/bin/phone-daemon-run %h/.local/bin/wait-for-adb %h/.local/bin/scrcpy --no-video --no-audio --display-id=99 --window-x=-4000 --window-y=-4000 --window-width=320 --window-height=200
+Restart=always
+RestartSec=5
+StandardOutput=append:%h/.local/opt/phonesync/clip.log
+StandardError=append:%h/.local/opt/phonesync/clip.log
+
+[Install]
+WantedBy=graphical-session.target
