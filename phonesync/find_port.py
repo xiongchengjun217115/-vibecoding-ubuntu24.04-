@@ -121,6 +121,9 @@ def main():
                 print("  本轮无发现（疑似被打限速），4 秒后重试…")
             time.sleep(4)
     print(f"  耗时 {time.time()-t0:.1f}s，开放端口: {ports if ports else '无'}")
+    if ports:
+        print("  注意：代理 ARP 的网络（校园网/企业网）会对随机端口回 SYN，上面可能有假阳性，")
+        print("        最终以 adb connect 的结果为准。")
 
     # 逐个尝试 adb connect，找到真正的 adb 端口
     before = set(adb_devices())
@@ -138,6 +141,11 @@ def main():
         subprocess.run([ADB, "disconnect", addr], capture_output=True, timeout=20)
 
     print("  ✗ 范围内没找到可用的 adb 端口")
+    print()
+    print("  最可靠的办法是直接看手机屏幕上的端口：")
+    print("    设置 → 系统设置 → 开发者选项 → 无线调试 → 「IP 地址和端口」")
+    print("    然后： phone use <那个地址>")
+    print("  （手机「无线调试」开着的前提下，扫描才有意义）")
     return 1
 
 

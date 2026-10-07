@@ -156,8 +156,24 @@ def notify_desktop(title, body, urgency="normal", icon="phone"):
         print(f"[warn] notify-send 失败: {e}", flush=True)
 
 
+LOG_FILE = Path.home() / ".local/opt/phonesync/sync.log"
+LOG_MAX_BYTES = 5 * 1024 * 1024
+_log_count = [0]
+
+
 def log(tag, msg):
     print(f"{time.strftime('%H:%M:%S')} [{tag}] {msg}", flush=True)
+    # 兜底：日志超 5MB 就截断。
+    # 起因是 inotify 死循环一晚把 sync.log 刷到 8.8MB / 6.8 万行 —— 根因已修，
+    # 但加个保险，免得以后别的意外再把磁盘写满。
+    _log_count[0] += 1
+    if _log_count[0] % 500 == 0:
+        try:
+            if LOG_FILE.exists() and LOG_FILE.stat().st_size > LOG_MAX_BYTES:
+                keep = LOG_FILE.read_text(encoding="utf-8", errors="replace").splitlines()[-1000:]
+                LOG_FILE.write_text("\n".join(keep) + "\n", encoding="utf-8")
+        except Exception:
+            pass
 
 
 # 结构化事件流：桌面 GUI 实时读取它来显示消息
@@ -322,8 +338,10 @@ class InotifyWatcher(threading.Thread):
                 cmd = [ADB, "exec-out", "inotifyd", "-"] + [f"{d}:nwy" for d in self.dirs]
                 p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL, bufsize=0)
-                self.ready = True
-                log("监听", f"inotify 事件监听就绪: {', '.join(self.dirs)}")
+                if not self.ready:
+                    # 只在「断开→连上」的状态切换时打日志，否则断线重连会把日志刷爆
+                    self.ready = True
+                    log("监听", f"inotify 事件监听就绪: {', '.join(self.dirs)}")
                 # 每行格式: <事件码>\t<目录>\t<文件名>
                 #   w = 写入完成（普通文件/ .pending 文件）
                 #   y = 改名到位（FUSE 把 .pending-xxx 改成真名的瞬间）
@@ -340,9 +358,13 @@ class InotifyWatcher(threading.Thread):
                 except Exception:
                     p.kill()
             except Exception as e:
+                if self.ready:
+                    log("监听", f"inotify 断开: {e}")
                 self.ready = False
-                log("监听", f"inotify 断开，5 秒后重连: {e}")
-                time.sleep(5)
+            # ⚠ 关键：无论正常退出还是异常，都必须喘一口气。
+            # 设备断开时 adb 连不上，inotifyd 会立刻退出 → 没有这个 sleep 就是死循环，
+            # 一晚能刷 6.8 万行日志、并且把 adb 打爆（踩过这个坑）
+            time.sleep(5)
 
 
 class ClipboardImage:
