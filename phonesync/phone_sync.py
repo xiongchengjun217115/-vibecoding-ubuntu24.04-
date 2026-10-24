@@ -288,12 +288,31 @@ def latest_photo():
     return (str(r[0]), r[1]) if r else None
 
 
+def _looks_complete(data):
+    """粗判图片字节是否完整。
+
+    截图刚产生的那一刻，文件可能还在被写入（实测最终文件有过 132 字节的中间态），
+    读到半截的 JPEG 会因为色度通道数据缺失而解码出**整片错色**（橙/紫/粉）。
+    """
+    if data[:2] == b"\xff\xd8":                        # JPEG：必须以 EOI 结尾
+        return data.rstrip(b"\x00").endswith(b"\xff\xd9")
+    if data[:8] == b"\x89PNG\r\n\x1a\n":             # PNG：必须有 IEND
+        return b"IEND" in data[-16:]
+    return len(data) > 0
+
+
 def pull_file(remote, local):
+    """拉取文件到本地，带完整性校验 + 重试（防"截图瞬间读到中间态"导致变色）。"""
     local.parent.mkdir(parents=True, exist_ok=True)
-    rc, out, err = adb("exec-out", f"cat '{remote}'", timeout=120)
-    if rc == 0 and out:
-        local.write_bytes(out)
-        return True
+    for _ in range(4):
+        rc, out, err = adb("exec-out", f"cat '{remote}'", timeout=120)
+        if rc == 0 and out:
+            if _looks_complete(out):
+                local.write_bytes(out)
+                return True
+            time.sleep(0.3)          # 读到中间态：等文件写完再重读
+            continue
+        break
     rc, out, err = adb("pull", remote, str(local), timeout=120)
     return rc == 0 and local.exists() and local.stat().st_size > 0
 
