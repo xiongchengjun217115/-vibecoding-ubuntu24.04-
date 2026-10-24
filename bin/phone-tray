@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""phone-tray — 系统托盘图标：手机剪贴板状态指示
+
+  灰色手机 = 待机
+  蓝色手机 + 右上角圆点 = 手机刚有新内容同步过来（闪 1.5 秒）
+
+  点图标 → 打开桌面客户端 / 退出
+
+依赖（需要 sudo 装一次）：
+  sudo apt install gir1.2-ayatanaappindicator3-0.1
+"""
+import os
+import subprocess
+import sys
+import time
+
+import gi
+
+gi.require_version("Gtk", "3.0")
+gi.require_version("AyatanaAppIndicator3", "0.1")
+from gi.repository import GLib, Gtk  # noqa: E402
+
+from gi.repository import AyatanaAppIndicator3 as AppIndicator  # noqa: E402
+
+HOME = os.path.expanduser("~")
+ICON_DIR = os.path.join(HOME, ".local/share/icons")
+ICON_IDLE = os.path.join(ICON_DIR, "phone-connect-idle.svg")
+ICON_ACTIVE = os.path.join(ICON_DIR, "phone-connect-active.svg")
+EVENTS = os.path.join(HOME, ".local/opt/phonesync/events.jsonl")
+STATE = os.path.join(HOME, ".local/opt/phonesync/tray.state")
+LOG = os.path.join(HOME, ".local/opt/phonesync/tray.log")
+
+FLASH_MS = 1500          # 蓝色停留时长
+POLL_MS = 400            # 检查 events.jsonl 的间隔
+
+
+def log(msg):
+    try:
+        with open(LOG, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} [托盘] {msg}\n")
+    except Exception:
+        pass
+
+
+class Tray:
+    def __init__(self):
+        self.ind = AppIndicator.Indicator.new(
+            "phone-connect", ICON_IDLE, AppIndicator.IndicatorCategory.APPLICATION_STATUS
+        )
+        self.ind.set_status(AppIndicator.IndicatorStatus.ACTIVE)
+        self.ind.set_title("手机连接")
+
+        menu = Gtk.Menu()
+        it_open = Gtk.MenuItem(label="打开手机连接")
+        it_open.connect("activate", self._open_gui)
+        menu.append(it_open)
+        it_clear = Gtk.MenuItem(label="清除提示")
+        it_clear.connect("activate", lambda _: self._idle())
+        menu.append(it_clear)
+        menu.append(Gtk.SeparatorMenuItem())
+        it_quit = Gtk.MenuItem(label="退出托盘")
+        it_quit.connect("activate", lambda _: Gtk.main_quit())
+        menu.append(it_quit)
+        menu.show_all()
+        self.ind.set_menu(menu)
+
+        self.pos = os.path.getsize(EVENTS) if os.path.exists(EVENTS) else 0
+        self.flash_id = 0
+        self.pending = False          # 有新内容但还没被"消费"（用于状态文件）
+
+    # ── 状态切换 ──
+    def _flash(self):
+        self.ind.set_icon_full(ICON_ACTIVE, "有新内容")
+        self.pending = True
+        self._write_state("active")
+        if self.flash_id:
+            GLib.source_remove(self.flash_id)
+        self.flash_id = GLib.timeout_add(FLASH_MS, self._idle)
+
+    def _idle(self):
+        self.ind.set_icon_full(ICON_IDLE, "手机连接")
+        self.pending = False
+        self._write_state("idle")
+        self.flash_id = 0
+        return False
+
+    def _write_state(self, value):
+        # 给桌面客户端/其它程序读的状态；写失败不影响托盘
+        try:
+            with open(STATE, "w", encoding="utf-8") as f:
+                f.write(value + "\n")
+        except Exception:
+            pass
+
+    def _open_gui(self, *_):
+        try:
+            subprocess.Popen(
+                ["phone-gui"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception as e:
+            log(f"打开客户端失败: {e}")
+
+    # ── 轮询 events.jsonl ──
+    def _poll(self):
+        try:
+            if os.path.exists(EVENTS):
+                size = os.path.getsize(EVENTS)
+                if size > self.pos:
+                    with open(EVENTS, "rb") as f:
+                        f.seek(self.pos)
+                        chunk = f.read().decode("utf-8", "replace")
+                    self.pos = size
+                    # 照片同步进剪贴板 = 手机有新内容可粘贴
+                    if '"type": "photo"' in chunk:
+                        if not self.flash_id:
+                            self._flash()
+                elif size < self.pos:
+                    self.pos = size       # 日志被截断/轮转
+        except Exception as e:
+            log(f"轮询失败: {e}")
+        return True
+
+    def run(self):
+        GLib.timeout_add(POLL_MS, self._poll)
+        log("已启动")
+        Gtk.main()
+
+
+def main():
+    for p in (ICON_IDLE, ICON_ACTIVE):
+        if not os.path.exists(p):
+            print(f"✗ 缺少图标: {p}", file=sys.stderr)
+            return 1
+    Tray().run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

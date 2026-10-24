@@ -160,7 +160,7 @@ fi
 
 # ═════════════════════ 3. 铺文件 ═════════════════════
 say "安装命令行工具 → $BIN"
-for f in phone phone-gui phone-autoconnect wait-for-adb phone-daemon-run phone-recover; do
+for f in phone phone-gui phone-autoconnect wait-for-adb phone-daemon-run phone-recover phone-tray; do
   install -m 755 "$SRC/bin/$f" "$BIN/$f"
 done
 ok "5 个工具"
@@ -194,6 +194,30 @@ X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=8
 EOF
 ok "应用菜单 + 开机自启"
+
+say "安装托盘图标"
+mkdir -p "$HOME/.local/share/icons"
+cp "$SRC"/extras/phone-connect-*.svg "$HOME/.local/share/icons/"
+gtk-update-icon-cache -f -t "$HOME/.local/share/icons" 2>/dev/null || true
+# 托盘依赖：装了就启用，没装只提示（不影响其它功能）
+if python3 -c "import gi; gi.require_version('AyatanaAppIndicator3','0.1'); from gi.repository import AyatanaAppIndicator3" 2>/dev/null; then
+  cat > "$AUTOSTART/phone-tray.desktop" <<TRAY
+[Desktop Entry]
+Type=Application
+Name=手机托盘图标
+Comment=显示手机剪贴板同步状态
+Exec=$HOME/.local/bin/phone-tray
+Icon=$HOME/.local/share/icons/phone-connect-idle.svg
+Terminal=false
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=10
+TRAY
+  ok "托盘已启用（灰色=待机，蓝色=手机有新内容）"
+else
+  warn "托盘图标需要额外一个包（20KB，需要 sudo）："
+  warn "    sudo apt install gir1.2-ayatanaappindicator3-0.1"
+  warn "  装完重跑 ./install.sh 即可启用托盘"
+fi
 
 # ═════════════════════ 6. 会话类型提示 ═════════════════════
 echo
