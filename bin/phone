@@ -39,8 +39,9 @@ phone — 手机 ↔ 电脑 工具箱
     phone wireless   用 USB 切成 TCP 5555 固定端口模式
     phone pair       无线调试配对（不需要 USB 线）
     phone use        记录无线调试的连接地址
+    phone recover    深度恢复无线连接（试 5555 → 扫描端口 → 自动固定回 5555）
     phone find       扫描手机 IP 自动找无线调试端口（重启后端口变了用这个）
-    phone autoconnect 触发一次智能重连
+    phone autoconnect 触发一次智能重连（后台服务用，静默+有节流）
     phone clipmode   控制手机照片要不要自动进电脑剪贴板
     phone pushclip   控制电脑→手机剪贴板推送（safe/always/off）
     phone usb        切回 USB 模式
@@ -276,6 +277,11 @@ PY
     # 扫描手机 IP 自动找无线调试端口（手机重启后端口会变，用这个找回）
     shift
     exec python3 "$DIR/find_port.py" "$@"
+    ;;
+  recover)
+    # 深度恢复：试 5555 → 试记录端口 → 扫描 → 固定回 5555 → 重启服务
+    shift
+    exec "$HOME/.local/bin/phone-recover" "$@"
     ;;
   autoconnect)
     exec "$HOME/.local/bin/phone-autoconnect"

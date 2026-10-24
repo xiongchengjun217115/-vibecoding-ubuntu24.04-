@@ -160,7 +160,7 @@ fi
 
 # ═════════════════════ 3. 铺文件 ═════════════════════
 say "安装命令行工具 → $BIN"
-for f in phone phone-gui phone-autoconnect wait-for-adb phone-daemon-run; do
+for f in phone phone-gui phone-autoconnect wait-for-adb phone-daemon-run phone-recover; do
   install -m 755 "$SRC/bin/$f" "$BIN/$f"
 done
 ok "5 个工具"

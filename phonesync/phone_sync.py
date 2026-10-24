@@ -318,6 +318,7 @@ class InotifyWatcher(threading.Thread):
         self.on_photo = on_photo          # 主线程回调（经 GLib.idle_add 派发）
         self.dirs = []
         self.ready = False
+        self._ready_log_at = 0.0          # 「就绪」日志上次打印时间（限流用）
 
     def detect_dirs(self):
         found = []
@@ -334,14 +335,27 @@ class InotifyWatcher(threading.Thread):
                 if not self.dirs:
                     time.sleep(10)
                     continue
+            # 设备不在线就别起进程、更别打日志。
+            # 没有这个预检时，inotifyd 会瞬间退出 → 每 5 秒重试一次 → 每 5 秒刷一条
+            # 「就绪」，16 天能刷 3.8 万行（踩过两次，这是第二次）
+            rc, out, _ = adb("get-state", timeout=8)
+            if rc != 0 or b"device" not in out:
+                if self.ready:
+                    self.ready = False
+                    log("监听", "设备断开，暂停监听（等待重连）")
+                time.sleep(5)
+                continue
             try:
                 cmd = [ADB, "exec-out", "inotifyd", "-"] + [f"{d}:nwy" for d in self.dirs]
                 p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL, bufsize=0)
                 if not self.ready:
-                    # 只在「断开→连上」的状态切换时打日志，否则断线重连会把日志刷爆
+                    # 只在「断开→连上」的状态切换时打日志，且 10 分钟最多一条作为兜底
                     self.ready = True
-                    log("监听", f"inotify 事件监听就绪: {', '.join(self.dirs)}")
+                    now = time.time()
+                    if now - self._ready_log_at > 600:
+                        self._ready_log_at = now
+                        log("监听", f"inotify 事件监听就绪: {', '.join(self.dirs)}")
                 # 每行格式: <事件码>\t<目录>\t<文件名>
                 #   w = 写入完成（普通文件/ .pending 文件）
                 #   y = 改名到位（FUSE 把 .pending-xxx 改成真名的瞬间）

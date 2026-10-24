@@ -250,11 +250,21 @@ phone status      # 连接状态 / 当前通道 / 服务
 phone log         # 实时日志
 phone screen      # 投屏 + 鼠标键盘反控手机
 phone photo       # 手动把最新一张照片拉到剪贴板
-phone find        # 扫描手机 IP 找回无线调试端口
+phone recover     # ★ 连不上时先跑这个（试 5555 → 扫描端口 → 自动固定回 5555）
+phone find        # 只扫描手机 IP 找端口（不做恢复动作）
 phone clipmode    # 照片要不要自动进剪贴板（all / camera / off）
 phone pushclip    # 电脑→手机推送模式（always / safe / off）
 phone start|stop  # 启停后台服务
 phone-gui         # 桌面客户端
+```
+
+### 连不上时的排查顺序
+
+```
+1. phone recover          ← 90% 的情况这一条就够了
+2. 还不行 → 看手机屏幕：设置 → 开发者选项 → 无线调试 → 「IP 地址和端口」
+                       然后 phone use <那个地址>
+3. 还不行 → 插一次 USB，执行 phone wireless（切回 5555 固定端口），再拔线
 ```
 
 ---
@@ -272,7 +282,37 @@ phone-gui         # 桌面客户端
 仓库里 `.gitignore` 挡住了所有日志和状态文件 —— 那些才含短信原文。
 
 **Q：手机重启后要重新配对吗？**
-不用。配对密钥存在手机里，无线调试开关也是持久化设置。只有**端口**会变，服务会自己扫回来。
+不用。配对密钥存在手机里，无线调试开关也是持久化设置。只有**端口**会变，`phone recover` 会找回来。
+
+**Q：手机屏幕上的「无线调试」明明开着，为什么就是连不上？**
+这是最坑的一个状态 —— **`adb tcpip` 和「无线调试」是两种互斥的监听模式**：
+
+```bash
+adb tcpip 5555     # → adbd 在 5555 明文监听，同时【抑制】无线调试的 TLS 端口
+adb usb            # → 取消 tcpip，无线调试的 TLS 端口恢复监听
+```
+
+所以如果之前跑过 `phone wireless`（内部就是 `adb tcpip 5555`），手机就会变成这样：
+
+| | 状态 |
+|---|---|
+| `service.adb.tcp.port` | `5555` |
+| `adb_wifi_enabled`（无线调试开关） | `1`（**看着是开的**） |
+| 实际在监听的端口 | **只有 5555** |
+| 手机屏幕显示的随机端口 | **实际不存在，怎么连都失败** |
+
+**判断方法**（插着 USB 时最直接）：
+
+```bash
+adb shell 'cat /proc/net/tcp /proc/net/tcp6' | grep -c ':15B3'   # 15B3 = 5555 十六进制
+adb shell getprop service.adb.tcp.port                          # 有值 = 走 tcpip 模式
+```
+
+**解法**：直接用 5555（`phone recover` 会自动试），或者 `phone usb` 切回无线调试模式。
+
+**Q：手机重启后 5555 没了怎么办？**
+`service.adb.tcp.port` 是临时属性（非 root 改不了持久化），重启会重置。
+跑一次 `phone recover` 即可 —— 它会扫描出无线调试的新端口、连上、再自动 `adb tcpip 5555` 固定回去。
 
 **Q：为什么不用 KDE Connect？**
 它是好方案，但需要在手机上装 App、在我们这边开 ufw 端口（要 sudo），而且功能没有 ADB 全
