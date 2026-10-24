@@ -27,8 +27,20 @@ ICON_DIR = os.path.join(HOME, ".local/share/icons")
 ICON_IDLE = os.path.join(ICON_DIR, "phone-connect-idle.svg")
 ICON_ACTIVE = os.path.join(ICON_DIR, "phone-connect-active.svg")
 EVENTS = os.path.join(HOME, ".local/opt/phonesync/events.jsonl")
+CLIP_LOG = os.path.join(HOME, ".local/opt/phonesync/clip.log")
+PUSH_LOG = os.path.join(HOME, ".local/opt/phonesync/push.log")
 STATE = os.path.join(HOME, ".local/opt/phonesync/tray.state")
 LOG = os.path.join(HOME, ".local/opt/phonesync/tray.log")
+
+# 三个触发源，任意一个出现新内容就让图标闪蓝：
+#   events.jsonl 的 photo     → 手机拍照/截图同步进电脑剪贴板
+#   clip.log 的 copied        → 手机上复制了文字（scrcpy 同步到电脑）
+#   push.log 的 已推送到手机   → 电脑上复制了文字（推到手机剪贴板）
+SOURCES = (
+    ("_pos_events", EVENTS, '"type": "photo"'),
+    ("_pos_clip", CLIP_LOG, "Device clipboard copied"),
+    ("_pos_push", PUSH_LOG, "已推送到手机剪贴板"),
+)
 
 FLASH_MS = 1500          # 蓝色停留时长
 POLL_MS = 400            # 检查 events.jsonl 的间隔
@@ -64,12 +76,14 @@ class Tray:
         menu.show_all()
         self.ind.set_menu(menu)
 
-        self.pos = os.path.getsize(EVENTS) if os.path.exists(EVENTS) else 0
+        for attr, path, _ in SOURCES:
+            setattr(self, attr, os.path.getsize(path) if os.path.exists(path) else 0)
         self.flash_id = 0
         self.pending = False          # 有新内容但还没被"消费"（用于状态文件）
 
     # ── 状态切换 ──
     def _flash(self):
+        log("触发闪烁")
         self.ind.set_icon_full(ICON_ACTIVE, "有新内容")
         self.pending = True
         self._write_state("active")
@@ -105,23 +119,28 @@ class Tray:
 
     # ── 轮询 events.jsonl ──
     def _poll(self):
-        try:
-            if os.path.exists(EVENTS):
-                size = os.path.getsize(EVENTS)
-                if size > self.pos:
-                    with open(EVENTS, "rb") as f:
-                        f.seek(self.pos)
+        hit = False
+        for attr, path, marker in SOURCES:
+            try:
+                if not os.path.exists(path):
+                    continue
+                size = os.path.getsize(path)
+                pos = getattr(self, attr, 0)
+                if size > pos:
+                    with open(path, "rb") as f:
+                        f.seek(pos)
                         chunk = f.read().decode("utf-8", "replace")
-                    self.pos = size
-                    # 照片同步进剪贴板 = 手机有新内容可粘贴
-                    if '"type": "photo"' in chunk:
-                        if not self.flash_id:
-                            self._flash()
-                elif size < self.pos:
-                    self.pos = size       # 日志被截断/轮转
-        except Exception as e:
-            log(f"轮询失败: {e}")
+                    setattr(self, attr, size)
+                    if marker in chunk:
+                        hit = True
+                elif size < pos:
+                    setattr(self, attr, size)      # 日志被截断/轮转
+            except Exception as e:
+                log(f"轮询 {os.path.basename(path)} 失败: {e}")
+        if hit and not self.flash_id:
+            self._flash()
         return True
+
 
     def run(self):
         GLib.timeout_add(POLL_MS, self._poll)

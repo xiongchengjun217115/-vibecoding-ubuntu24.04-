@@ -294,42 +294,89 @@ def _looks_complete(data):
     截图刚产生的那一刻，文件可能还在被写入（实测最终文件有过 132 字节的中间态），
     读到半截的 JPEG 会因为色度通道数据缺失而解码出**整片错色**（橙/紫/粉）。
     """
-    if data[:2] == b"\xff\xd8":                        # JPEG：必须以 EOI 结尾
-        return data.rstrip(b"\x00").endswith(b"\xff\xd9")
+    if data[:2] == b"\xff\xd8":                        # JPEG
+        # EOI (ffd9) 一般就在末尾，但相机照片会在其后追加厂商私有数据
+        # （实测 OnePlus 的相机照片末尾跟着 451 字节的 jxrs 水印块），
+        # 所以只要求在文件尾部一段范围内出现 ffd9
+        return b"\xff\xd9" in data[-4096:]
     if data[:8] == b"\x89PNG\r\n\x1a\n":             # PNG：必须有 IEND
         return b"IEND" in data[-16:]
-    return len(data) > 0
+    # 其它格式：先排除 adb exec-out 混进来的错误文本。
+    # adb exec-out 不分离 stdout/stderr，文件不存在时 "cat: ... No such file" 会进 stdout，
+    # 之前对未知格式直接 return len(data)>0，导致错误文本被当成图片存下来（踩过）
+    if data[:5] in (b"cat: ", b"adb: ") or data[:9] == b"adb: error":
+        return False
+    return len(data) > 16
+
+
+def _remote_size(remote):
+    """手机上文件的字节数（很便宜，~30ms）；拿不到返回 -1。"""
+    rc, out, _ = adb("shell", f"stat -c %s '{remote}' 2>/dev/null", timeout=10)
+    try:
+        return int(out.strip())
+    except Exception:
+        return -1
 
 
 def pull_file(remote, local):
-    """拉取文件到本地，带「双读一致性」校验。
+    """拉取文件到本地，兼顾「不读到中间态」和速度。
 
-    为什么不能只校验 EOI/IEND：
-      截图文件是「先分配完整大小、再逐块填充数据」的。如果在填充中途读，会拿到
-      **大小正确但内容是新旧数据混合**的文件；末尾碰巧还留着上一份文件的 EOI 标记，
-      单次完整性校验照样通过。解码出来就是局部过曝 / 变色（实测踩过）。
+    竞态：文件是「先分配完整大小、再逐块填充」的，中途读会拿到
+    【大小正确、内容是新旧混合】的字节 → 解码出来局部过曝/变色。
 
-    所以判据只有一个：**连着读两次，字节完全相同**才算文件已经稳定。
+    两处优化（实测）：
+      · 用 adb pull 而不是 exec-out cat：3.4MB 文件 695ms → 323ms
+        （pull 有内置的批量传输优化；校验仍在本地做，本地读 3.4MB 只要 ~5ms）
+      · 小文件（≤1MB，截图）拉两次比对哈希；大文件拉一次 + 读后 stat 确认大小
+        （大文件重复拉代价太高，实测会把延迟从 4s 拖到 17s）
     """
     local.parent.mkdir(parents=True, exist_ok=True)
+    # inotify 事件可能延迟，处理时文件已被删/改名（如 .pending → 真名）→ 直接跳过
+    rc, out, _ = adb("shell", f"[ -f '{remote}' ] && echo y", timeout=10)
+    if b"y" not in out:
+        return False
+    tmp = local.parent / (local.name + ".part")
     prev_hash = None
-    for _ in range(6):
-        rc, out, err = adb("exec-out", f"cat '{remote}'", timeout=120)
-        if rc == 0 and out and _looks_complete(out):
-            h = hashlib.sha256(out).hexdigest()
-            if h == prev_hash:                 # 两次读一致 → 内容稳定，采纳
-                local.write_bytes(out)
-                return True
-            prev_hash = h                      # 还在变，等会儿再确认一次
-            time.sleep(0.25)
-            continue
-        prev_hash = None
-        time.sleep(0.3)                        # 空/不完整：文件还没写完
-    # 兜底：adb pull
-    rc, out, err = adb("pull", remote, str(local), timeout=120)
-    if rc == 0 and local.exists() and local.stat().st_size > 0:
+    try:
+        for _ in range(3):
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except Exception:
+                pass
+            rc, _, _ = adb("pull", remote, str(tmp), timeout=180)
+            if rc != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+                time.sleep(0.2)
+                continue
+            data = tmp.read_bytes()            # 本地磁盘读，3.4MB ≈ 5ms
+            if not _looks_complete(data):
+                time.sleep(0.2)
+                continue
+            n = len(data)
+            if n <= 1024 * 1024:
+                h = hashlib.sha256(data).hexdigest()
+                if h != prev_hash:             # 小文件：两次一致才采纳
+                    prev_hash = h
+                    time.sleep(0.12)
+                    continue
+            else:
+                if _remote_size(remote) != n:  # 大文件：读后确认大小没变
+                    time.sleep(0.3)
+                    continue
+            tmp.replace(local)
+            return True
+    finally:
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except Exception:
+            pass
+
+    # 最后兜底：exec-out cat（某些路径 adb pull 会失败）
+    rc, out, err = adb("exec-out", f"cat '{remote}'", timeout=180)
+    if rc == 0 and out and _looks_complete(out):
+        local.write_bytes(out)
         return True
-    # 失败时把自己留下的空壳删掉 —— 否则会在相册目录里堆 0 字节垃圾文件
     try:
         if local.exists() and local.stat().st_size == 0:
             local.unlink()
@@ -456,6 +503,11 @@ class ClipboardImage:
         #   PNG 用 compression=1（482ms）而不是默认 6（2280ms）—— 快 4.7 倍，
         #   代价是体积 10.9MB→12.9MB（反正只是内存里传，不走网络）。
         fmt = cfg("clip_image_format", "both")
+        # 大图只给 JPEG：12MP 照片的 PNG 要编码 430ms、占 10.7MB 内存，
+        # 而 JPEG 只要 27ms / 1.2MB，粘贴方也更愿意收 JPEG（实测）
+        BIG = 2000000                       # 像素数阈值（2MP）
+        if fmt == "both" and w * h > BIG:
+            fmt = "jpeg"
         out = {"w": w, "h": h, "fmt": fmt}
         if fmt in ("png", "both"):
             out["png"] = bytes(pb.save_to_bufferv("png", ["compression"], ["1"])[1])
