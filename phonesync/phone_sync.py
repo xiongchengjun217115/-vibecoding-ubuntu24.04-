@@ -306,15 +306,22 @@ def pull_file(remote, local):
     local.parent.mkdir(parents=True, exist_ok=True)
     for _ in range(4):
         rc, out, err = adb("exec-out", f"cat '{remote}'", timeout=120)
-        if rc == 0 and out:
-            if _looks_complete(out):
-                local.write_bytes(out)
-                return True
-            time.sleep(0.3)          # 读到中间态：等文件写完再重读
-            continue
-        break
+        if rc == 0 and out and _looks_complete(out):
+            local.write_bytes(out)
+            return True
+        # cat 拿到空或不完整（截图秒出时文件可能刚创建还没内容）→ 等文件写完再试
+        time.sleep(0.3)
+    # 兜底：adb pull
     rc, out, err = adb("pull", remote, str(local), timeout=120)
-    return rc == 0 and local.exists() and local.stat().st_size > 0
+    if rc == 0 and local.exists() and local.stat().st_size > 0:
+        return True
+    # 失败时把自己留下的空壳删掉 —— 否则会在相册目录里堆 0 字节垃圾文件
+    try:
+        if local.exists() and local.stat().st_size == 0:
+            local.unlink()
+    except Exception:
+        pass
+    return False
 
 
 class InotifyWatcher(threading.Thread):
