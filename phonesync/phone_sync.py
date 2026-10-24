@@ -302,15 +302,29 @@ def _looks_complete(data):
 
 
 def pull_file(remote, local):
-    """拉取文件到本地，带完整性校验 + 重试（防"截图瞬间读到中间态"导致变色）。"""
+    """拉取文件到本地，带「双读一致性」校验。
+
+    为什么不能只校验 EOI/IEND：
+      截图文件是「先分配完整大小、再逐块填充数据」的。如果在填充中途读，会拿到
+      **大小正确但内容是新旧数据混合**的文件；末尾碰巧还留着上一份文件的 EOI 标记，
+      单次完整性校验照样通过。解码出来就是局部过曝 / 变色（实测踩过）。
+
+    所以判据只有一个：**连着读两次，字节完全相同**才算文件已经稳定。
+    """
     local.parent.mkdir(parents=True, exist_ok=True)
-    for _ in range(4):
+    prev_hash = None
+    for _ in range(6):
         rc, out, err = adb("exec-out", f"cat '{remote}'", timeout=120)
         if rc == 0 and out and _looks_complete(out):
-            local.write_bytes(out)
-            return True
-        # cat 拿到空或不完整（截图秒出时文件可能刚创建还没内容）→ 等文件写完再试
-        time.sleep(0.3)
+            h = hashlib.sha256(out).hexdigest()
+            if h == prev_hash:                 # 两次读一致 → 内容稳定，采纳
+                local.write_bytes(out)
+                return True
+            prev_hash = h                      # 还在变，等会儿再确认一次
+            time.sleep(0.25)
+            continue
+        prev_hash = None
+        time.sleep(0.3)                        # 空/不完整：文件还没写完
     # 兜底：adb pull
     rc, out, err = adb("pull", remote, str(local), timeout=120)
     if rc == 0 and local.exists() and local.stat().st_size > 0:
