@@ -15,9 +15,22 @@
 #   1. 试固定端口 5555
 #   2. 试 wireless.env 里记录的端口
 #   3. 扫描 32768-60999，逐个 adb connect 验证
-#   4. 连上后执行 adb tcpip 5555，把端口固定回去
+#   4. 连上后执行 adb tcpip 5555，把端口固定回去（--secure 时跳过，保留 TLS 加密）
 #   5. 更新 wireless.env 并重启同步服务
+#
+# 用法：
+#   phone recover             默认：固定回 5555（方便，流量明文但有密钥认证）
+#   phone recover --secure    不固定端口，保持无线调试的 TLS 加密（端口随机）
 set -uo pipefail
+
+# 默认把端口固定回 5555（方便，但明文）。--secure 则不固定，
+# 保持「无线调试」的 TLS 加密模式（代价：端口随机，下次要重新扫）。
+FIX_PORT=1
+for a in "$@"; do
+  case "$a" in
+    --secure|--no-fix-port) FIX_PORT=0 ;;
+  esac
+done
 
 _pick_bin() {
   for c in "$@"; do
@@ -157,14 +170,27 @@ if [ -z "$FOUND" ]; then
 fi
 
 # ── 阶段 4：把端口固定回 5555 ──
-if [ "${FOUND##*:}" != "5555" ]; then
-  say "④ 把端口固定回 5555（以后就不用每次找了）..."
+if [ "$FIX_PORT" = "1" ] && [ "${FOUND##*:}" != "5555" ]; then
+  say "④ 把端口固定回 5555（以后就不用每次找了；想保留 TLS 加密请用 phone recover --secure）..."
   "$ADB" -s "$FOUND" tcpip 5555 >/dev/null 2>&1
   sleep 3
   if try_connect "$IP:5555"; then
     FOUND="$IP:5555"; ok "已固定到 5555"
   else
     warn "固定失败（无线连接可能不支持重设端口），继续用 ${FOUND##*:}"
+  fi
+fi
+
+if [ "$FIX_PORT" = "0" ]; then
+  if [ "${FOUND##*:}" = "5555" ]; then
+    echo
+    warn "注意：当前用的是 tcpip 5555（明文）模式，--secure 不会自动帮你切。"
+    warn "想要 TLS 加密，需要两步："
+    warn "  1) phone usb              关闭 5555，让无线调试的 TLS 端口恢复监听"
+    warn "  2) phone recover --secure 重新扫描并连 TLS 端口"
+  else
+    ok "保持无线调试的 TLS 加密模式（端口 ${FOUND##*:}）"
+    ok "下次端口变了，再跑一次 phone recover --secure"
   fi
 fi
 

@@ -40,6 +40,7 @@ phone — 手机 ↔ 电脑 工具箱
     phone pair       无线调试配对（不需要 USB 线）
     phone use        记录无线调试的连接地址
     phone recover    深度恢复无线连接（试 5555 → 扫描端口 → 自动固定回 5555）
+                     加 --secure 则不固定端口，保留无线调试的 TLS 加密
     phone find       扫描手机 IP 自动找无线调试端口（重启后端口变了用这个）
     phone autoconnect 触发一次智能重连（后台服务用，静默+有节流）
     phone clipmode   控制手机照片要不要自动进电脑剪贴板
