@@ -49,13 +49,23 @@ die()  { printf '  \033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
 
 command -v "$ADB" >/dev/null 2>&1 || [ -x "$ADB" ] || die "找不到 adb"
 
-# ── 读记录 ──
-IP=""; PORT=""
-if [ -r "$STATE" ]; then
-  IP="$(sed -n 's/^WIRELESS_IP=//p' "$STATE" | head -1)"
-  PORT="$(sed -n 's/^WIRELESS_PORT=//p' "$STATE" | head -1)"
-fi
-[ -n "$IP" ] || die "没记录过无线地址。先：phone pair <地址> <配对码> 然后 phone use <地址>"
+# ── 收集候选地址 ──
+# Tailscale 优先：手机的 tailnet IP 固定不变，比校园网 DHCP 地址可靠得多。
+# 手机换网络（Wi-Fi ↔ 流量）时校园网 IP 会失效，但 tailnet IP 始终可用。
+_ts_ip() {
+  command -v tailscale >/dev/null 2>&1 || return 1
+  tailscale status 2>/dev/null | awk '$4=="android"{print $1; exit}'
+}
+TS_IP="$(_ts_ip 2>/dev/null || true)"
+LAN_IP="$(sed -n 's/^WIRELESS_IP=//p' "$STATE" 2>/dev/null | head -1)"
+PORT="$(sed -n 's/^WIRELESS_PORT=//p' "$STATE" 2>/dev/null | head -1)"
+
+CAND_IPS=()
+[ -n "$TS_IP" ] && CAND_IPS+=("$TS_IP")
+if [ -n "$LAN_IP" ] && [ "$LAN_IP" != "$TS_IP" ]; then CAND_IPS+=("$LAN_IP"); fi
+[ ${#CAND_IPS[@]} -gt 0 ] || die "没记录过无线地址，也没在 Tailscale 上发现手机。
+    先配对：phone pair <地址> <配对码>　或确认手机 Tailscale 在线"
+IP="${CAND_IPS[0]}"
 
 device_ok() { "$ADB" devices 2>/dev/null | awk 'NR>1 && $2=="device"{print $1}' | grep -qx "$1"; }
 
@@ -76,40 +86,27 @@ record() {        # $1=ip:port
 }
 
 echo "phone recover — 深度恢复无线连接"
-say "目标 IP: $IP   (记录端口: ${PORT:-无})"
-
-# ── 阶段 0：IP 可达性 ──
-if ! ping -c 2 -W 2 "$IP" >/dev/null 2>&1; then
-  echo
-  die "IP $IP ping 不通。
-    可能原因：
-      · 手机没连 Wi-Fi，或者连的不是同一个网络
-      · 手机 IP 变了（静态 IP 没设好？）
-      · 手机 Wi-Fi 刚重连，还没拿到地址
-    先确认手机 WLAN 详情页上的 IP，必要时： phone use <新地址>"
-fi
-ok "IP $IP 可达"
+say "候选地址: ${CAND_IPS[*]}   (记录端口: ${PORT:-无})"
 
 FOUND=""
 
-# ── 阶段 1：固定端口 5555 ──
-say "① 试固定端口 5555 ..."
-if try_connect "$IP:5555"; then
-  FOUND="$IP:5555"; ok "5555 可用"
-fi
-
-# ── 阶段 2：记录端口 ──
-if [ -z "$FOUND" ] && [ -n "$PORT" ] && [ "$PORT" != "5555" ]; then
-  say "② 试记录端口 $PORT ..."
-  if try_connect "$IP:$PORT"; then
-    FOUND="$IP:$PORT"; ok "记录端口可用"
+# ── 阶段 1+2：逐个候选 IP 试固定端口和记录端口 ──
+for ip in "${CAND_IPS[@]}"; do
+  [ -n "$FOUND" ] && break
+  say "① $ip 试固定端口 5555 ..."
+  if try_connect "$ip:5555"; then FOUND="$ip:5555"; ok "5555 可用"; break; fi
+  if [ -n "$PORT" ] && [ "$PORT" != "5555" ]; then
+    say "② $ip 试记录端口 $PORT ..."
+    if try_connect "$ip:$PORT"; then FOUND="$ip:$PORT"; ok "记录端口可用"; break; fi
   fi
-fi
+done
 
-# ── 阶段 3：扫描 ──
+# ── 阶段 3：扫描（对每个候选 IP）──
 if [ -z "$FOUND" ]; then
-  say "③ 快速方式都不行，扫描 $IP 的 32768-60999（约 30~90 秒，请稍等）..."
-  CANDIDATES="$(python3 - "$IP" <<'PY'
+ for ip in "${CAND_IPS[@]}"; do
+  [ -n "$FOUND" ] && break
+  say "③ 扫描 $ip 的 32768-60999（约 30~90 秒，请稍等）..."
+  CANDIDATES="$(python3 - "$ip" <<'PY'
 import asyncio, sys, time
 
 ip = sys.argv[1]
@@ -148,12 +145,13 @@ PY
     for p in $CANDIDATES; do
       i=$((i + 1))
       printf '      [%d/%d] 试 %s ... ' "$i" "$N" "$p"
-      if try_connect "$IP:$p"; then
-        printf '✓\n'; ok "adb 端口: $p"; FOUND="$IP:$p"; break
+      if try_connect "$ip:$p"; then
+        printf '✓\n'; ok "adb 端口: $p"; FOUND="$ip:$p"; break
       fi
       printf '✗\n'
     done
   fi
+ done
 fi
 
 # ── 失败 ──
@@ -174,8 +172,8 @@ if [ "$FIX_PORT" = "1" ] && [ "${FOUND##*:}" != "5555" ]; then
   say "④ 把端口固定回 5555（以后就不用每次找了；想保留 TLS 加密请用 phone recover --secure）..."
   "$ADB" -s "$FOUND" tcpip 5555 >/dev/null 2>&1
   sleep 3
-  if try_connect "$IP:5555"; then
-    FOUND="$IP:5555"; ok "已固定到 5555"
+  if try_connect "${FOUND%:*}:5555"; then
+    FOUND="${FOUND%:*}:5555"; ok "已固定到 5555"
   else
     warn "固定失败（无线连接可能不支持重设端口），继续用 ${FOUND##*:}"
   fi
