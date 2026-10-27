@@ -503,10 +503,14 @@ class ClipboardImage:
         #   PNG 用 compression=1（482ms）而不是默认 6（2280ms）—— 快 4.7 倍，
         #   代价是体积 10.9MB→12.9MB（反正只是内存里传，不走网络）。
         fmt = cfg("clip_image_format", "both")
-        # 大图只给 JPEG：12MP 照片的 PNG 要编码 430ms、占 10.7MB 内存，
-        # 而 JPEG 只要 27ms / 1.2MB，粘贴方也更愿意收 JPEG（实测）
-        BIG = 2000000                       # 像素数阈值（2MP）
-        if fmt == "both" and w * h > BIG:
+        # 大图只给 JPEG：12MP 相机照片的 PNG 要编码 430ms、占 10.7MB 内存，
+        # 而 JPEG 只要 27ms / 1.2MB。
+        #
+        # ⚠ 但【截图必须给 PNG】：浏览器（含 DSH 网页端）粘贴图片只认 image/png，
+        # 只给 JPEG 时粘贴会静默失败。截图是 1080x2392 = 2.58MP，一度被 2MP 阈值
+        # 误判成大图，导致网页端粘不进去（回归过，教训写这儿）。
+        is_shot = "Screenshot" in str(path) or "Screenshots" in str(path)
+        if fmt == "both" and not is_shot and w * h > 2000000:
             fmt = "jpeg"
         out = {"w": w, "h": h, "fmt": fmt}
         if fmt in ("png", "both"):
