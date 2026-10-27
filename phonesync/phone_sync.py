@@ -503,18 +503,25 @@ class ClipboardImage:
         #   PNG 用 compression=1（482ms）而不是默认 6（2280ms）—— 快 4.7 倍，
         #   代价是体积 10.9MB→12.9MB（反正只是内存里传，不走网络）。
         fmt = cfg("clip_image_format", "both")
-        # 大图只给 JPEG：12MP 相机照片的 PNG 要编码 430ms、占 10.7MB 内存，
-        # 而 JPEG 只要 27ms / 1.2MB。
-        #
-        # ⚠ 但【截图必须给 PNG】：浏览器（含 DSH 网页端）粘贴图片只认 image/png，
-        # 只给 JPEG 时粘贴会静默失败。截图是 1080x2392 = 2.58MP，一度被 2MP 阈值
-        # 误判成大图，导致网页端粘不进去（回归过，教训写这儿）。
-        is_shot = "Screenshot" in str(path) or "Screenshots" in str(path)
-        if fmt == "both" and not is_shot and w * h > 2000000:
-            fmt = "jpeg"
         out = {"w": w, "h": h, "fmt": fmt}
+
+        # ⚠ 浏览器（含 DSH 网页端）粘贴图片只认 image/png —— 只给 JPEG 会静默失败。
+        # 所以哪怕相机照片也必须提供 PNG，只是大图先缩放：
+        #   12.6MP 全尺寸 PNG = 12.9MB / 编码 482ms
+        #   缩到长边 2560    = 5.3MB  / 编码 201ms   ← 浏览器更能接受，且更快
+        # 截图（≤4MP）不缩放，保持原尺寸。
+        PNG_MAX_SIDE = 2560
+        PNG_SCALE_ABOVE = 4000000          # 超过 4MP 才缩放
         if fmt in ("png", "both"):
-            out["png"] = bytes(pb.save_to_bufferv("png", ["compression"], ["1"])[1])
+            if w * h > PNG_SCALE_ABOVE and max(w, h) > PNG_MAX_SIDE:
+                sc = PNG_MAX_SIDE / max(w, h)
+                nw, nh = int(w * sc), int(h * sc)
+                small = pb.scale_simple(nw, nh, self.GdkPixbuf.InterpType.BILINEAR)
+                out["png"] = bytes(small.save_to_bufferv("png", ["compression"], ["1"])[1])
+                out["png_w"], out["png_h"] = nw, nh
+            else:
+                out["png"] = bytes(pb.save_to_bufferv("png", ["compression"], ["1"])[1])
+                out["png_w"], out["png_h"] = w, h
         if fmt in ("jpeg", "both"):
             out["jpg"] = bytes(pb.save_to_bufferv("jpeg", ["quality"], ["90"])[1])
         return out
