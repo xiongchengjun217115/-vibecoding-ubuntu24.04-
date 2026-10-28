@@ -69,6 +69,9 @@ NOISE_PKGS = {
     "android", "com.android.systemui", "com.android.providers.downloads",
     "com.android.settings", "com.android.bluetooth", "com.android.vending",
     "com.android.nfc", "com.android.server.telecom",
+    # shell 通知 = 电脑通过 adb 发到手机的（如「电脑盖子打开」），不该再镜像回电脑，
+    # 否则会绕一圈：手机通知 → 桌面通知 + 客户端消息流，看着像重复
+    "com.android.shell",
 }
 
 

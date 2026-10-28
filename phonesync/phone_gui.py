@@ -5,6 +5,7 @@ phone-gui — 手机连接监控客户端（GTK4 + libadwaita）
 功能：
   · 连接状态：是否连接、设备型号、系统版本、连接方式（USB/无线）、电量
   · 总开关  ：一键启停后台同步服务
+  · 开盖通知：笔记本开盖时向手机通知栏发布一条通知的总开关
   · 剪贴板  ：实时显示当前剪贴板内容；手机复制的文字经 scrcpy 同步后会立即出现
   · 消息    ：实时滚动显示短信与通知（读 events.jsonl）
 
@@ -46,10 +47,14 @@ ADB = _resolve_bin("ADB", ["adb"], "adb")
 DIR = HOME / ".local/opt/phonesync"
 EVENTS = DIR / "events.jsonl"
 WIRELESS_ENV = DIR / "wireless.env"
+CONFIG = DIR / "config.json"
 
 SERVICES = ("phone-clip.service", "phone-sync.service")
+LID_SERVICE = "lid-notify.service"   # 开盖通知（独立服务，不归「同步」总开关管）
+LID_KEY = "lid_notify"               # config.json 里的开关键
 POLL_FAST = 2.0     # 连接状态轮询
 POLL_BATT = 20.0    # 电量轮询
+POLL_LID_SVC = 10.0  # 开盖通知服务状态轮询
 MAX_MSG = 120       # 消息列表上限
 MAX_CLIP_HIST = 12  # 剪贴板历史上限
 
@@ -69,6 +74,36 @@ def run(cmd, timeout=15):
         return p.returncode, p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace")
     except Exception:
         return 1, "", ""
+
+
+def read_config():
+    try:
+        return json.loads(CONFIG.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def write_config_key(key, value):
+    """原子写回 config.json（先写临时文件再 rename），别把其它配置项写丢。"""
+    data = read_config()
+    data[key] = value
+    tmp = CONFIG.with_name(CONFIG.name + ".tmp")
+    try:
+        DIR.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, CONFIG)
+        return True
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return False
+
+
+def lid_config_enabled():
+    """开盖通知开关；没切换过时默认开（与 lid_notify.py 保持一致）。"""
+    return bool(read_config().get(LID_KEY, True))
 
 
 def fmt_time(ts):
@@ -166,6 +201,16 @@ class Monitor(threading.Thread):
             states.append("unknown")
         return dict(zip(SERVICES, states))
 
+    def _lid_service(self):
+        """开盖通知服务状态（10 秒缓存，没必要每拍都问 systemd）"""
+        now = time.time()
+        if getattr(self, "_lid_cache", None) is not None and now - self._lid_ts < POLL_LID_SVC:
+            return self._lid_cache
+        rc, out, _ = run(["systemctl", "--user", "is-active", LID_SERVICE], timeout=8)
+        self._lid_cache = out.strip() or "unknown"
+        self._lid_ts = now
+        return self._lid_cache
+
     def _wireless_addr(self):
         """从 wireless.env 读 (ip, port)；端口默认 5555（无线调试的端口是随机的）"""
         ip = port = None
@@ -221,6 +266,7 @@ class Monitor(threading.Thread):
             "services": svc,
             "services_on": all(v == "active" for v in svc.values()),
             "services_partial": any(v == "active" for v in svc.values()),
+            "lid_service": self._lid_service(),
             "wireless_ip": wip,
             "wireless_port": wport,
             "wireless_addr": f"{wip}:{wport}" if wip else None,
@@ -252,6 +298,9 @@ class App(Adw.Application):
         self.msgs = []
         self.events_pos = 0
         self.switch_guard = False
+        self.lid_enabled = lid_config_enabled()
+        self.snap_connected = None
+        self.snap_lid_service = "unknown"
         self._built = False
         self._scanning = False
 
@@ -296,6 +345,18 @@ class App(Adw.Application):
                   self.row_svc, self.row_port):
             g_conn.add(r)
         page.add(g_conn)
+
+        # ── 开盖通知 ──
+        g_lid = Adw.PreferencesGroup(
+            title="开盖通知",
+            description="笔记本从合盖变为开盖时，向手机通知栏发布一条通知（不占用剪贴板）",
+        )
+        self.row_lid = Adw.SwitchRow(title="电脑开盖时通知手机")
+        self.row_lid.set_active(self.lid_enabled)
+        self.row_lid.connect("notify::active", self.on_lid_switch)
+        g_lid.add(self.row_lid)
+        page.add(g_lid)
+        self._update_lid_subtitle()
 
         # ── 剪贴板 ──
         g_clip = Adw.PreferencesGroup(
@@ -428,6 +489,10 @@ class App(Adw.Application):
             icon = "camera-photo-symbolic"
             title = "新照片" + ("（已进剪贴板）" if ev.get("copied") else "（已保存）")
             body = ev.get("name", "")
+        elif t == "lid":
+            icon = "computer-symbolic"
+            title = "电脑状态 · 盖子打开"
+            body = ev.get("text", "") or ev.get("time", "")
         else:
             return
 
@@ -453,6 +518,34 @@ class App(Adw.Application):
             n += 1
             c = c.get_next_sibling()
         return n
+
+    # ---------- 开盖通知开关 ----------
+    def on_lid_switch(self, row, _pspec):
+        enabled = row.get_active()
+        if enabled == self.lid_enabled:
+            return
+        self.lid_enabled = enabled
+        if write_config_key(LID_KEY, enabled):
+            self.toast_overlay.add_toast(Adw.Toast(
+                title="开盖通知已开启，开盖后会在手机通知栏弹出"
+                if enabled else "开盖通知已关闭，开盖不再发通知"))
+        else:
+            self.toast_overlay.add_toast(Adw.Toast(title="保存失败：config.json 写不进去"))
+        self._update_lid_subtitle()
+
+    def _update_lid_subtitle(self):
+        row = getattr(self, "row_lid", None)
+        if row is None:
+            return
+        svc = getattr(self, "snap_lid_service", None)
+        if not self.lid_enabled:
+            row.set_subtitle("已关闭 · 开盖不再发通知")
+        elif svc is not None and svc != "active":
+            row.set_subtitle("开关已开，但后台服务未运行（systemctl --user start lid-notify.service）")
+        elif getattr(self, "snap_connected", None) is False:
+            row.set_subtitle("开关已开 · 手机未连接，开盖通知暂时发不出去")
+        else:
+            row.set_subtitle("开关已开 · 开盖后向手机通知栏发布一条通知")
 
     # ---------- 开关 ----------
     def on_switch(self, sw, state):
@@ -516,6 +609,9 @@ class App(Adw.Application):
         if "error" in snap:
             self.title.set_subtitle("监控异常")
             return
+        self.snap_connected = snap.get("connected")
+        self.snap_lid_service = snap.get("lid_service", "unknown")
+        self._update_lid_subtitle()
         # 开关
         want = snap["services_on"]
         if self.switch.get_active() != want:

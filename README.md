@@ -21,11 +21,12 @@
 | **截图 / 拍照 → 电脑剪贴板** | 手机拍完直接去电脑粘贴，实测 0.4~0.7 秒 |
 | **短信同步** | 直读系统短信库，比抓通知更全 |
 | **通知镜像** | 实时推送到桌面通知 + 客户端消息流 |
+| **开盖通知** | 笔记本合盖→开盖时，向手机通知栏发布一条通知（不占用剪贴板） |
 | **桌面客户端** | GTK4 界面，看连接状态 / 剪贴板 / 消息 |
 | **托盘状态图标** | 灰色手机=待机，蓝色=有新内容，三个方向都提示 |
 | **投屏 + 反控** | scrcpy 自带，鼠标键盘可操作手机 |
 | **端口自愈** | 手机重启后端口变了，一条命令找回 |
-| **开机自启** | 三个 systemd 用户服务 + 客户端 + 托盘 |
+| **开机自启** | 四个 systemd 用户服务 + 客户端 + 托盘 |
 
 ---
 
@@ -114,6 +115,9 @@ phone pushclip always|safe|off   # 电脑→手机推送模式（默认 always�
 
 配置文件在 `~/.local/opt/phonesync/config.json`，改完重启对应服务生效。
 
+**开盖通知**（默认开）：可以在「手机连接」客户端里直接开关，也可以改 `config.json` 的 `lid_notify`（`true`/`false`），改完立即生效。
+触发时通过 adb 往手机通知栏发一条「HH:MM 电脑盖子打开」，「手机连接」的「消息」区同时留一条记录。
+
 ### 托盘图标
 
 登录后在屏幕**右下角**（时间左边）：
@@ -193,12 +197,13 @@ bin/          7 个命令行工具
   phone-recover   深度恢复无线连接
   phone-tray      托盘状态图标
   phone-autoconnect / wait-for-adb / phone-daemon-run   服务辅助
-phonesync/    4 个 Python 模块
+phonesync/    5 个 Python 模块
   phone_sync.py      守护进程（短信 / 通知 / 照片）
   phone_gui.py       GTK4 客户端
   phone_pushclip.py  电脑→手机剪贴板
   find_port.py       端口扫描
-systemd/      3 个用户服务
+  lid_notify.py      开盖通知（向手机通知栏发布）
+systemd/      4 个用户服务
 extras/       托盘图标 SVG
 desktop/      桌面项模板
 install.sh / uninstall.sh

@@ -167,10 +167,14 @@ ok "5 个工具"
 
 say "安装守护进程 → $OPT"
 mkdir -p "$OPT"
-for f in phone_sync.py phone_gui.py phone_pushclip.py find_port.py; do
+for f in phone_sync.py phone_gui.py phone_pushclip.py find_port.py lid_notify.py; do
   install -m 644 "$SRC/phonesync/$f" "$OPT/$f"
 done
-ok "4 个模块"
+ok "5 个模块（含开盖通知）"
+# v0.5 起开盖通知合并进 phonesync/，旧版装在 ~/.local/opt/lidnotify/
+if [ -d "$HOME/.local/opt/lidnotify" ]; then
+  warn "检测到旧版 ~/.local/opt/lidnotify/（已合并到 $OPT），不影响使用，可手动删除"
+fi
 
 # ═════════════════════ 4. systemd ═════════════════════
 if [ "$DO_SERVICES" = "1" ] && command -v systemctl >/dev/null 2>&1; then
@@ -178,7 +182,7 @@ if [ "$DO_SERVICES" = "1" ] && command -v systemctl >/dev/null 2>&1; then
   mkdir -p "$UNIT"
   cp "$SRC"/systemd/*.service "$UNIT/"
   systemctl --user daemon-reload 2>/dev/null || true
-  systemctl --user enable phone-clip.service phone-sync.service phone-push.service 2>/dev/null || true
+  systemctl --user enable phone-clip.service phone-sync.service phone-push.service lid-notify.service 2>/dev/null || true
   ok "已启用（登录桌面后自动运行）"
 else
   warn "跳过 systemd 安装（可稍后手动 cp systemd/*.service ~/.config/systemd/user/）"

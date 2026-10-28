@@ -1,0 +1,18 @@
+[Unit]
+Description=笔记本盖子打开 → 手机通知栏（手机连接）
+After=graphical-session.target
+PartOf=graphical-session.target
+# 找不到盖子状态文件时会退出，无限重试更稳（比如 /proc 还没就绪）
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/.local/bin/phone-daemon-run /usr/bin/python3 -u %h/.local/opt/phonesync/lid_notify.py
+Restart=always
+RestartSec=5
+StandardOutput=append:%h/.local/opt/phonesync/lid.log
+StandardError=append:%h/.local/opt/phonesync/lid.log
+
+[Install]
+WantedBy=graphical-session.target
