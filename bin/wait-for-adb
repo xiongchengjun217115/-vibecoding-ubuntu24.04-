@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# wait-for-adb — 等一台"已授权"的 adb 设备就绪，然后 exec 给定命令
+# wait-for-adb — 等一台"指定/已授权"的 adb 设备就绪，然后 exec 给定命令
 #
 # 特点：
+#   · 支持 PHONE_MODEL 按机型精确挑选设备（多设备并存时不再"随机中奖"）
+#     例：PHONE_MODEL=PLF110 只等手机；PHONE_MODEL=OPD2405 只等平板
+#   · 未指定 PHONE_MODEL 时，排除 PAD_MODEL（默认 OPD2405）后再挑，避免和副设备抢
 #   · 优先无线通道（序列号形如 ip:port），其次 USB —— 避免"more than one device"歧义
-#   · 没有设备时，会尝试用 wireless.env 里记录的 IP 自动 adb connect
-#   · 全程静默：手机不在时 0 输出、0 日志垃圾
+#   · 没有设备时，会用 WIRELESS_ENV 指向的文件里记录的地址自动 adb connect
+#     （未显式指定 WIRELESS_ENV 时，兼容旧行为：交给 phone-autoconnect 处理手机）
+#   · 全程静默：设备不在时 0 输出、0 日志垃圾
 set -uo pipefail
 
-# 解析依赖路径：环境变量 > ~/.local/bin > PATH
-# （install.sh 会把找到的 scrcpy/adb 软链到 ~/.local/bin，但不强求必须在那）
 _pick_bin() {
   for c in "$@"; do
     [ -n "$c" ] && [ -x "$c" ] && { printf '%s' "$c"; return 0; }
@@ -16,15 +18,36 @@ _pick_bin() {
   return 1
 }
 ADB="$(_pick_bin "${ADB:-}" "$HOME/.local/bin/adb" "$(command -v adb 2>/dev/null)")" || ADB="adb"
-STATE="$HOME/.local/opt/phonesync/wireless.env"
+
+PHONE_MODEL="${PHONE_MODEL:-}"
+PAD_MODEL="${PAD_MODEL:-OPD2405}"
+WIRELESS_ENV="${WIRELESS_ENV:-}"
+STATE="${WIRELESS_ENV:-$HOME/.local/opt/phonesync/wireless.env}"
 
 pick() {
-  "$ADB" devices 2>/dev/null | awk 'NR>1 && $2=="device"{print $1}' |
-    awk '/:/{tcp=$0} !/:/{usb=$0} END{ if (tcp) print tcp; else if (usb) print usb }'
+  "$ADB" devices -l 2>/dev/null | awk -v want="$PHONE_MODEL" -v pad="$PAD_MODEL" '
+    NR>1 && $2=="device" {
+      model=""
+      for (i=3; i<=NF; i++) if ($i ~ /^model:/) { model=substr($i,7) }
+      if (want != "" && model != want) next
+      if (want == "" && model == pad) next
+      if ($1 ~ /:/) { tcp=$1 } else if (usb == "") { usb=$1 }
+    }
+    END { if (tcp != "") print tcp; else if (usb != "") print usb }'
 }
 
-try_wireless() {
-  # 交给 phone-autoconnect：先试记录地址，必要时（限流）扫描找新端口
+try_connect() {
+  # 1) 指定了 WIRELESS_ENV（平板等固定地址设备）：直接读文件里的地址连一次
+  if [ -n "$WIRELESS_ENV" ] && [ -f "$STATE" ]; then
+    local ip="" port="5555"
+    # shellcheck disable=SC1090
+    . "$STATE" 2>/dev/null || true
+    ip="${WIRELESS_IP:-}"
+    port="${WIRELESS_PORT:-5555}"
+    [ -n "$ip" ] && timeout 8 "$ADB" connect "$ip:$port" >/dev/null 2>&1
+    return 0
+  fi
+  # 2) 手机：交给 phone-autoconnect（先试记录地址，必要时限流扫描找新端口）
   [ -x "$HOME/.local/bin/phone-autoconnect" ] || return 0
   timeout 150 "$HOME/.local/bin/phone-autoconnect" >/dev/null 2>&1
 }
@@ -32,7 +55,7 @@ try_wireless() {
 for _ in $(seq 1 100000); do
   serial="$(pick)"
   if [ -z "$serial" ]; then
-    try_wireless
+    try_connect
     serial="$(pick)"
   fi
   if [ -n "$serial" ]; then

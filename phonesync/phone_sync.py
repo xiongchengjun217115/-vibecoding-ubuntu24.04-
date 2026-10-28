@@ -91,6 +91,7 @@ def shell(cmd, timeout=30):
 
 
 WIRELESS_ENV = Path.home() / ".local/opt/phonesync/wireless.env"
+PHONE_MODEL = os.environ.get("PHONE_MODEL", "PLF110")
 
 
 def list_devices():
@@ -103,16 +104,35 @@ def list_devices():
     return devs
 
 
+def list_devices_detailed():
+    """返回 [(serial, model), ...]，只含状态为 device 的已授权设备。"""
+    rc, out, _ = adb("devices", "-l")
+    devs = []
+    for ln in out.decode().strip().splitlines()[1:]:
+        parts = ln.split()
+        if len(parts) >= 2 and parts[1] == "device":
+            model = ""
+            for p in parts:
+                if p.startswith("model:"):
+                    model = p.split(":", 1)[1]
+            devs.append((parts[0], model))
+    return devs
+
+
 def pick_device():
-    """优先无线通道（序列号形如 ip:port），其次 USB；避免"more than one device"歧义"""
-    devs = list_devices()
+    """只挑手机（按 PHONE_MODEL），避免多设备并存时误连平板"""
+    devs = list_devices_detailed()
     if not devs:
         return None
-    for d in devs:
-        if ":" in d:
-            return d
-    return devs[0]
-
+    matched = [d for d, m in devs if m == PHONE_MODEL]
+    if matched:
+        return next((d for d in matched if ":" in d), matched[0])
+    # 兜底：没匹配机型时退化为"无线优先"，但排除平板，绝不抢平板
+    pad_model = os.environ.get("PAD_MODEL", "OPD2405")
+    others = [d for d, m in devs if m != pad_model]
+    if not others:
+        return None
+    return next((d for d in others if ":" in d), others[0])
 
 def device_ready():
     return pick_device()

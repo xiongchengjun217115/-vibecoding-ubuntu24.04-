@@ -101,34 +101,39 @@ def safe_to_push():
     return False, "手机正在输入（有聚焦输入框），跳过以免粘错地方"
 
 
-def scrcpy_window():
+def scrcpy_windows():
+    """返回当前所有 scrcpy 窗口（每台被同步的设备一个窗口）。"""
     rc, out, _ = run(["xdotool", "search", "--class", "scrcpy"])
-    ids = [x.strip() for x in out.splitlines() if x.strip()]
-    return ids[-1] if ids else None
+    return [x.strip() for x in out.splitlines() if x.strip()]
 
 
-def hide_scrcpy_window():
+def hide_scrcpy_windows():
     """
-    scrcpy 的窗口纯粹是为了接收按键才存在的，把它藏起来免得碍眼。
+    scrcpy 的窗口纯粹是为了接收按键才存在的，把它们藏起来免得碍眼。
     实测 unmap 之后 XSendEvent 送进去的按键仍然有效（scrcpy 照常 SET_CLIPBOARD）。
     """
-    wid = scrcpy_window()
-    if not wid:
-        return
-    rc, out, _ = run(["xwininfo", "-id", wid])
-    if "IsViewable" in out:
-        run(["xdotool", "windowunmap", wid])
-        log("已隐藏 scrcpy 窗口（它只为接收 Ctrl+V 而存在）")
+    wids = scrcpy_windows()
+    for wid in wids:
+        rc, out, _ = run(["xwininfo", "-id", wid])
+        if "IsViewable" in out:
+            run(["xdotool", "windowunmap", wid])
+    if wids:
+        log(f"已隐藏 {len(wids)} 个 scrcpy 窗口（它们只为接收 Ctrl+V 而存在）")
 
 
 def push(text):
-    wid = scrcpy_window()
-    if not wid:
+    """把剪贴板推给所有已连接的设备（每个 scrcpy 窗口对应一台设备）。"""
+    wids = scrcpy_windows()
+    if not wids:
         return False, "找不到 scrcpy 窗口（服务是否在跑？）"
-    run(["xdotool", "windowactivate", wid])
-    time.sleep(0.25)
-    run(["xdotool", "key", "--window", wid, "ctrl+v"])
-    return True, "ok"
+    ok = 0
+    for wid in wids:
+        run(["xdotool", "windowactivate", wid])
+        time.sleep(0.15)
+        rc, _, _ = run(["xdotool", "key", "--window", wid, "ctrl+v"])
+        if rc == 0:
+            ok += 1
+    return ok > 0, f"{ok}/{len(wids)} 个设备"
 
 
 class Pusher:
@@ -161,7 +166,7 @@ class Pusher:
             reason = "always 模式"
         ok, msg = push(text)
         if ok:
-            log(f"✓ 已推送到手机剪贴板（{reason}）: {preview!r}")
+            log(f"✓ 已推送到 {msg}（{reason}）: {preview!r}")
         else:
             log(f"✗ 推送失败: {msg}")
 
@@ -182,8 +187,8 @@ def main():
 
     Gtk.init([])
     Pusher(mode)
-    hide_scrcpy_window()
-    GLib.timeout_add_seconds(8, lambda: (hide_scrcpy_window(), True)[1])
+    hide_scrcpy_windows()
+    GLib.timeout_add_seconds(8, lambda: (hide_scrcpy_windows(), True)[1])
     log(f"已启动，mode={mode}"
         + ("（无条件推送；粘贴注入已被 --display-id=99 丢弃，无副作用）" if mode == "always"
            else "（额外要求手机息屏/锁屏/无输入框）"))

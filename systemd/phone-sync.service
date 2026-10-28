@@ -8,6 +8,9 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 Environment=PYTHONUNBUFFERED=1
+# 只同步手机（PLF110）的通知/短信/照片，不抢平板
+Environment=PHONE_MODEL=PLF110
+Environment=PAD_MODEL=OPD2405
 ExecStart=%h/.local/bin/phone-daemon-run /usr/bin/python3 %h/.local/opt/phonesync/phone_sync.py
 Restart=always
 RestartSec=5

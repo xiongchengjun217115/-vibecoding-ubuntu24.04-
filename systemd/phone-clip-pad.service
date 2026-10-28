@@ -1,0 +1,23 @@
+[Unit]
+Description=平板剪贴板同步（scrcpy 双向）
+After=graphical-session.target phone-clip.service
+PartOf=graphical-session.target
+# 平板不在线时 scrcpy 会立刻退出，需要无限重试，所以关掉启动频率限制
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# 固定只连平板（OPD2405）；手机由 phone-clip.service 负责，两者互不抢设备
+Environment=PHONE_MODEL=OPD2405
+Environment=PAD_MODEL=OPD2405
+Environment=WIRELESS_ENV=%h/.local/opt/phonesync/wireless-pad.env
+# 与手机同一套原理：屏幕外窗口 + --display-id=99 丢弃 PASTE 副作用；
+# --window-title 区分窗口，phone_pushclip 会同时向所有 scrcpy 窗口推送。
+ExecStart=%h/.local/bin/phone-daemon-run %h/.local/bin/wait-for-adb %h/.local/bin/scrcpy --no-video --no-audio --display-id=99 --window-title=scrcpy-pad --window-x=-4000 --window-y=-4000 --window-width=320 --window-height=200
+Restart=always
+RestartSec=5
+StandardOutput=append:%h/.local/opt/phonesync/clip-pad.log
+StandardError=append:%h/.local/opt/phonesync/clip-pad.log
+
+[Install]
+WantedBy=graphical-session.target

@@ -49,7 +49,12 @@ EVENTS = DIR / "events.jsonl"
 WIRELESS_ENV = DIR / "wireless.env"
 CONFIG = DIR / "config.json"
 
-SERVICES = ("phone-clip.service", "phone-sync.service")
+SERVICES = ("phone-clip.service", "phone-clip-pad.service",
+            "phone-push.service", "phone-sync.service")
+# 按机型区分设备角色：手机（PLF110）走 phone-clip，平板（OPD2405）走 phone-clip-pad
+ROLE_BY_MODEL = {"PLF110": "手机", "OPD2405": "平板"}
+ROLE_SERVICE = {"手机": "phone-clip.service", "平板": "phone-clip-pad.service"}
+PAD_WIRELESS_ENV = DIR / "wireless-pad.env"
 LID_SERVICE = "lid-notify.service"   # 开盖通知（独立服务，不归「同步」总开关管）
 LID_KEY = "lid_notify"               # config.json 里的开关键
 POLL_FAST = 2.0     # 连接状态轮询
@@ -139,8 +144,7 @@ class Monitor(threading.Thread):
         self.push = push
         self.stop_flag = threading.Event()
         self.props_cache = {}
-        self.battery = None
-        self.batt_ts = 0.0
+        self.batt_cache = {}      # serial -> (level, status, ts)
         self.snapshot = {}
 
     # ---- adb ----
@@ -149,8 +153,13 @@ class Monitor(threading.Thread):
         devs = []
         for ln in out.splitlines()[1:]:
             parts = ln.split()
-            if len(parts) >= 2:
-                devs.append({"serial": parts[0], "state": parts[1]})
+            if len(parts) < 2:
+                continue
+            model = ""
+            for p in parts[2:]:
+                if p.startswith("model:"):
+                    model = p.split(":", 1)[1]
+            devs.append({"serial": parts[0], "state": parts[1], "model": model})
         return devs
 
     @staticmethod
@@ -178,8 +187,9 @@ class Monitor(threading.Thread):
 
     def _battery(self, serial):
         now = time.time()
-        if self.battery is not None and now - self.batt_ts < POLL_BATT:
-            return self.battery
+        cached = self.batt_cache.get(serial)
+        if cached and now - cached[2] < POLL_BATT:
+            return cached[0], cached[1]
         rc, out, _ = run([ADB, "-s", serial, "shell", "dumpsys battery"], timeout=15)
         level, status = None, None
         for ln in out.splitlines():
@@ -188,9 +198,8 @@ class Monitor(threading.Thread):
                 level = ln.split(":", 1)[1].strip()
             elif ln.startswith("status:"):
                 status = ln.split(":", 1)[1].strip()
-        self.battery = (level, status)
-        self.batt_ts = now
-        return self.battery
+        self.batt_cache[serial] = (level, status, now)
+        return level, status
 
     # ---- systemd ----
     @staticmethod
@@ -211,11 +220,12 @@ class Monitor(threading.Thread):
         self._lid_ts = now
         return self._lid_cache
 
-    def _wireless_addr(self):
-        """从 wireless.env 读 (ip, port)；端口默认 5555（无线调试的端口是随机的）"""
+    def _wireless_addr(self, path=None):
+        """读 env 文件得到 (ip, port)；端口默认 5555（无线调试的端口是随机的）"""
+        env = Path(path) if path else WIRELESS_ENV
         ip = port = None
         try:
-            for line in WIRELESS_ENV.read_text(encoding="utf-8").splitlines():
+            for line in env.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
                 if line.startswith("WIRELESS_IP="):
                     ip = line.split("=", 1)[1].strip()
@@ -258,6 +268,7 @@ class Monitor(threading.Thread):
         cur = self._pick(devs)
         svc = self._services()
         wip, wport = self._wireless_addr()
+        pip, pport = self._wireless_addr(PAD_WIRELESS_ENV)
         snap = {
             "devices": devs,
             "connected": cur is not None,
@@ -270,9 +281,29 @@ class Monitor(threading.Thread):
             "wireless_ip": wip,
             "wireless_port": wport,
             "wireless_addr": f"{wip}:{wport}" if wip else None,
+            "pad_wireless_addr": f"{pip}:{pport}" if pip else None,
+            "device_list": [],
             "model": None, "android": None, "brand": None, "battery": None, "charging": None,
             "phone_online": None, "adbd_down": False,
         }
+        # ── 多设备明细（手机 + 平板可同时在线）──
+        for d in devs:
+            if d["state"] != "device":
+                continue
+            p = self._props(d["serial"])
+            role = ROLE_BY_MODEL.get(p["model"], "其他")
+            svc_name = ROLE_SERVICE.get(role)
+            level, status = self._battery(d["serial"])
+            snap["device_list"].append({
+                "serial": d["serial"],
+                "model": p["model"], "brand": p["brand"], "android": p["android"],
+                "role": role,
+                "link": "无线" if ":" in d["serial"] else "USB",
+                "battery": level,
+                "charging": status in ("2", "5"),
+                "service": svc_name,
+                "syncing": bool(svc_name and svc.get(svc_name) == "active"),
+            })
         # 未授权设备优先提示
         unauth = [d for d in devs if d["state"] == "unauthorized"]
         snap["unauthorized"] = bool(unauth)
@@ -323,16 +354,18 @@ class App(Adw.Application):
 
         page = Adw.PreferencesPage()
 
-        # ── 连接状态 ──
-        g_conn = Adw.PreferencesGroup(title="连接状态")
-        self.row_dev = Adw.ActionRow(title="设备", subtitle="—")
-        self.row_os = Adw.ActionRow(title="系统", subtitle="—")
-        self.row_link = Adw.ActionRow(title="连接方式", subtitle="—")
-        self.row_batt = Adw.ActionRow(title="电量", subtitle="—")
+        # ── 设备（手机 + 平板可同时在线）──
+        g_conn = Adw.PreferencesGroup(
+            title="设备",
+            description="手机（PLF110）与平板（OPD2405）可同时同步剪贴板，各有一行状态",
+        )
+        self.g_dev = g_conn
+        self.row_empty = Adw.ActionRow(title="未检测到设备", subtitle="等待手机 / 平板接入…")
         self.row_svc = Adw.ActionRow(title="后台服务", subtitle="—")
 
         # 无线端口 + 手动「重新扫描」（手机重启后端口会变，用它找回）
-        self.row_port = Adw.ActionRow(title="无线端口", subtitle="—")
+        self.row_port = Adw.ActionRow(title="无线端口（手机）", subtitle="—")
+        self.row_pad_port = Adw.ActionRow(title="无线端口（平板）", subtitle="—")
         self.spinner = Gtk.Spinner(valign=Gtk.Align.CENTER, visible=False)
         self.btn_scan = Gtk.Button(icon_name="view-refresh-symbolic", valign=Gtk.Align.CENTER,
                                    tooltip_text="扫描手机 IP，自动找回无线调试端口")
@@ -341,9 +374,8 @@ class App(Adw.Application):
         self.row_port.add_suffix(self.spinner)
         self.row_port.add_suffix(self.btn_scan)
 
-        for r in (self.row_dev, self.row_os, self.row_link, self.row_batt,
-                  self.row_svc, self.row_port):
-            g_conn.add(r)
+        # 行由 _render_devices 统一增删（Adw.PreferencesGroup 不支持可靠清空）
+        self._rows_added = []
         page.add(g_conn)
 
         # ── 开盖通知 ──
@@ -604,6 +636,57 @@ class App(Adw.Application):
                 title="✓ 已连接" if ok else "✗ 没找到端口 —— 确认手机「无线调试」已打开"))
         return False
 
+    # ---------- 设备列表渲染 ----------
+    def _render_devices(self, snap):
+        """把 device_list 渲染成设备行（手机 / 平板各一行）。
+
+        注意：Adw.PreferencesGroup 没有可靠的"清空"API（get_first_child 拿到的是
+        内部容器，remove 会报 non-child），所以自己维护已添加行的列表，逐行 remove。
+        """
+        devs = snap.get("device_list") or []
+        for row in getattr(self, "_rows_added", []):
+            try:
+                self.g_dev.remove(row)
+            except Exception:
+                pass
+        self._rows_added = []
+
+        def add(row):
+            self.g_dev.add(row)
+            self._rows_added.append(row)
+
+        if not devs:
+            if snap.get("unauthorized"):
+                self.row_empty.set_title("设备已连接但未授权")
+                self.row_empty.set_subtitle("请在设备上点「允许 USB 调试」")
+            elif snap.get("adbd_down"):
+                self.row_empty.set_title("手机在线，调试服务未开")
+                self.row_empty.set_subtitle("请打开「开发者选项 → 无线调试」")
+            elif snap.get("phone_online") is False:
+                self.row_empty.set_title("手机不在网络上")
+                self.row_empty.set_subtitle(f"检查 {snap.get('wireless_ip')} 的网络 / Tailscale")
+            else:
+                self.row_empty.set_title("未检测到设备")
+                self.row_empty.set_subtitle("等待手机 / 平板接入…")
+            add(self.row_empty)
+        else:
+            for d in devs:
+                title = f"{d['role']} · {d['brand']} {d['model']}"
+                bits = [d["link"], f"Android {d['android']}"]
+                if d.get("battery"):
+                    bits.append(f"🔋{d['battery']}%" + (" ⚡" if d.get("charging") else ""))
+                bits.append("剪贴板同步中" if d.get("syncing") else "同步服务未运行")
+                row = Adw.ActionRow(title=title, subtitle="  ·  ".join(bits))
+                icon = "phone-symbolic" if d["role"] == "手机" else (
+                    "tablet-symbolic" if d["role"] == "平板" else "computer-symbolic")
+                row.add_prefix(Gtk.Image.new_from_icon_name(icon))
+                row.add_suffix(Gtk.Image.new_from_icon_name(
+                    "emblem-ok-symbolic" if d.get("syncing") else "dialog-warning-symbolic"))
+                add(row)
+        # 服务 / 端口行固定排在设备行之后
+        for r in (self.row_svc, self.row_port, self.row_pad_port):
+            add(r)
+
     # ---------- 状态刷新 ----------
     def _apply(self, snap):
         if "error" in snap:
@@ -619,43 +702,17 @@ class App(Adw.Application):
             self.switch.set_active(want)
             self.switch_guard = False
 
-        if snap["connected"]:
-            link = "无线" if snap["wireless"] else "USB"
-            addr = snap["serial"]
-            self.title.set_subtitle(f"● 已连接 · {link}")
-            self.row_dev.set_subtitle(f"{snap['brand']} {snap['model']}")
-            self.row_os.set_subtitle(f"Android {snap['android']}")
-            self.row_link.set_subtitle(f"{link}  ·  {addr}")
-            if snap["battery"]:
-                b = f"{snap['battery']}%"
-                if snap["charging"]:
-                    b += "  ⚡充电中"
-                self.row_batt.set_subtitle(b)
-            else:
-                self.row_batt.set_subtitle("—")
+        self._render_devices(snap)
+        devs = snap.get("device_list") or []
+        if devs:
+            roles = "、".join(sorted({d["role"] for d in devs}))
+            self.title.set_subtitle(f"● {len(devs)} 台在线（{roles}）")
         elif snap.get("unauthorized"):
             self.title.set_subtitle("⚠ 未授权")
-            self.row_dev.set_subtitle("手机已连接，但未授权调试")
-            self.row_os.set_subtitle("请在手机上点「允许 USB 调试」")
-            self.row_link.set_subtitle("—")
-            self.row_batt.set_subtitle("—")
         elif snap.get("adbd_down"):
-            addr = snap.get("wireless_addr")
             self.title.set_subtitle("⚠ 手机在线，调试未开")
-            self.row_dev.set_subtitle("手机在网络上，但调试服务没在跑")
-            self.row_os.set_subtitle("请打开「开发者选项 → USB 调试」或「无线调试」")
-            self.row_link.set_subtitle(f"{addr} 可达，但该端口拒绝连接")
-            self.row_batt.set_subtitle("—")
         else:
             self.title.set_subtitle("○ 未连接")
-            addr = snap.get("wireless_addr")
-            if snap.get("phone_online") is False:
-                self.row_dev.set_subtitle(f"手机 {snap.get('wireless_ip')} 不在网络上")
-            else:
-                self.row_dev.set_subtitle("未检测到手机")
-            self.row_os.set_subtitle("—")
-            self.row_link.set_subtitle(f"无线已配置 {addr}，等待连接…" if addr else "尚未配置无线")
-            self.row_batt.set_subtitle("—")
 
         svc = snap["services"]
         on = [k.split(".")[0] for k, v in svc.items() if v == "active"]
@@ -668,14 +725,23 @@ class App(Adw.Application):
 
         # 无线端口行（扫描中不覆盖提示文字）
         if not self._scanning:
-            cur = snap.get("serial")
+            devs_now = snap.get("device_list") or []
+            phone_serials = [d["serial"] for d in devs_now if d["role"] == "手机"]
+            pad_serials = [d["serial"] for d in devs_now if d["role"] == "平板"]
             addr = snap.get("wireless_addr")
-            if cur and ":" in cur:
-                self.row_port.set_subtitle(f"{cur} · 使用中")
+            padaddr = snap.get("pad_wireless_addr")
+            if phone_serials:
+                self.row_port.set_subtitle(f"{phone_serials[0]} · 使用中")
             elif addr:
                 self.row_port.set_subtitle(f"{addr} · 未使用，点 ↻ 重扫")
             else:
                 self.row_port.set_subtitle("尚未配置 · 点右侧 ↻ 扫描")
+            if pad_serials:
+                self.row_pad_port.set_subtitle(f"{pad_serials[0]} · 使用中")
+            elif padaddr:
+                self.row_pad_port.set_subtitle(f"{padaddr} · 未使用（端口变了改 wireless-pad.env）")
+            else:
+                self.row_pad_port.set_subtitle("尚未配置（wireless-pad.env）")
 
     def do_activate(self):
         if not self._built:

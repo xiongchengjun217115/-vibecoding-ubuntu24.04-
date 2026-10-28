@@ -182,7 +182,18 @@ if [ "$DO_SERVICES" = "1" ] && command -v systemctl >/dev/null 2>&1; then
   mkdir -p "$UNIT"
   cp "$SRC"/systemd/*.service "$UNIT/"
   systemctl --user daemon-reload 2>/dev/null || true
-  systemctl --user enable phone-clip.service phone-sync.service phone-push.service lid-notify.service 2>/dev/null || true
+  systemctl --user enable phone-clip.service phone-clip-pad.service phone-sync.service phone-push.service lid-notify.service 2>/dev/null || true
+  # 平板（可选）：多设备同时同步需要独立的设备地址文件
+  if [ ! -f "$OPT/wireless-pad.env" ]; then
+    cat > "$OPT/wireless-pad.env" <<'PADEOF'
+# 平板无线调试地址（可选）：要同时同步平板时填写
+# 在平板「无线调试」页看到形如 100.120.115.85:36401 的地址，填到这里
+# 不接平板可以不填（phone-clip-pad 服务会空转等待，不影响手机）
+WIRELESS_IP=
+WIRELESS_PORT=
+PADEOF
+    warn "平板同步（可选）：要同步平板，请编辑 $OPT/wireless-pad.env 填入平板的「无线调试」地址"
+  fi
   ok "已启用（登录桌面后自动运行）"
 else
   warn "跳过 systemd 安装（可稍后手动 cp systemd/*.service ~/.config/systemd/user/）"

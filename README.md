@@ -1,6 +1,6 @@
-# 手机 ↔ Ubuntu 无线协同
+# 手机 / 平板 ↔ Ubuntu 无线协同
 
-把 Android 手机和 Ubuntu 电脑连起来：**剪贴板双向同步、手机截图/拍照直接进电脑剪贴板、短信和通知实时镜像。**
+把 Android 手机、平板和 Ubuntu 电脑连起来：**剪贴板双向同步、手机截图/拍照直接进电脑剪贴板、短信和通知实时镜像。**
 
 不需要数据线，**手机上也不用装任何 App** —— 只用 Android 自带的「无线调试」。
 
@@ -18,6 +18,7 @@
 | 功能 | 说明 |
 |---|---|
 | **剪贴板双向同步** | 文字两个方向实时同步 |
+| **多设备同时同步** | 手机 + 平板可同时与电脑双向同步剪贴板（各一个 scrcpy 实例） |
 | **截图 / 拍照 → 电脑剪贴板** | 手机拍完直接去电脑粘贴，实测 0.4~0.7 秒 |
 | **短信同步** | 直读系统短信库，比抓通知更全 |
 | **通知镜像** | 实时推送到桌面通知 + 客户端消息流 |
@@ -26,7 +27,7 @@
 | **托盘状态图标** | 灰色手机=待机，蓝色=有新内容，三个方向都提示 |
 | **投屏 + 反控** | scrcpy 自带，鼠标键盘可操作手机 |
 | **端口自愈** | 手机重启后端口变了，一条命令找回 |
-| **开机自启** | 四个 systemd 用户服务 + 客户端 + 托盘 |
+| **开机自启** | 五个 systemd 用户服务 + 客户端 + 托盘 |
 
 ---
 
@@ -93,6 +94,22 @@ phone use  192.168.1.50:40123          # 「无线调试」主界面的连接地
 ---
 
 ## 使用
+
+### 平板（可选）
+
+手机之外还想同时同步平板，只需填一个地址文件：
+
+```bash
+cat > ~/.local/opt/phonesync/wireless-pad.env <<'EOF'
+WIRELESS_IP=100.120.115.85
+WIRELESS_PORT=36401
+EOF
+systemctl --user restart phone-clip-pad.service
+```
+
+- 地址就是平板「开发者选项 → 无线调试」页显示的 `IP:端口`
+- 平板无线调试端口变化时改这个文件；手机仍由 `phone recover` 自动找回
+- 不接平板：`systemctl --user disable --now phone-clip-pad.service`（不影响手机）
 
 ### 命令
 
@@ -203,13 +220,13 @@ phonesync/    5 个 Python 模块
   phone_pushclip.py  电脑→手机剪贴板
   find_port.py       端口扫描
   lid_notify.py      开盖通知（向手机通知栏发布）
-systemd/      4 个用户服务
+systemd/      5 个用户服务（含 phone-clip-pad）
 extras/       托盘图标 SVG
 desktop/      桌面项模板
 install.sh / uninstall.sh
 ```
 
-运行时数据在 `~/.local/opt/phonesync/`：`config.json`、`wireless.env`、`events.jsonl`、`*.log`。
+运行时数据在 `~/.local/opt/phonesync/`：`config.json`、`wireless.env`、`wireless-pad.env`、`events.jsonl`、`*.log`。
 **这些是个人数据，已被 `.gitignore` 排除。**
 
 ---

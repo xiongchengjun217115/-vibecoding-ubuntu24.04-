@@ -4,6 +4,7 @@
 state.json
 config.json
 wireless.env
+wireless-pad.env
 .last_scan
 .scan_count
 *.pid

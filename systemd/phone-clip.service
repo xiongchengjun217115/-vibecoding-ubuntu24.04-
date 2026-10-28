@@ -7,6 +7,8 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
+# 固定只连手机（PLF110）；平板由 phone-clip-pad.service 单独负责，避免抢设备
+Environment=PHONE_MODEL=PLF110
 # 保留一个「移到屏幕外」的窗口：scrcpy 的「电脑→手机」剪贴板同步只绑定在窗口里按
 # Ctrl+V 这个动作上，无窗口模式没有这个入口（phone-pushclip 会往这个窗口发 Ctrl+V）。
 #
@@ -17,7 +19,7 @@ Type=simple
 # 剪贴板照常设置成功，手机界面完全不受影响。
 #
 # --no-video 不产生视频编码开销，但仍然有窗口可接收按键。
-ExecStart=%h/.local/bin/phone-daemon-run %h/.local/bin/wait-for-adb %h/.local/bin/scrcpy --no-video --no-audio --display-id=99 --window-x=-4000 --window-y=-4000 --window-width=320 --window-height=200
+ExecStart=%h/.local/bin/phone-daemon-run %h/.local/bin/wait-for-adb %h/.local/bin/scrcpy --no-video --no-audio --display-id=99 --window-title=scrcpy-phone --window-x=-4000 --window-y=-4000 --window-width=320 --window-height=200
 Restart=always
 RestartSec=5
 StandardOutput=append:%h/.local/opt/phonesync/clip.log
