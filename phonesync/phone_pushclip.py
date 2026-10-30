@@ -139,9 +139,22 @@ def push(text):
 class Pusher:
     def __init__(self, mode):
         self.mode = mode
-        self.last = None
+        self.last = None            # 上一次"成功推送"的内容
+        self.pending_logged = None  # 已打印过"跳过"日志的内容（避免轮询刷屏）
+        self.last_attempt = 0.0     # 上次推送失败时间（失败后 30 秒再试）
         self.cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
         self.cb.connect("owner-change", self._on_change)
+        # ⚠ 兜底轮询：GTK 的 owner-change 信号在长时间运行 / 系统睡眠恢复后会失效
+        # （表现为电脑复制后 push.log 毫无记录）。每秒异步读一次剪贴板，
+        # 内容变化时照常推送；去重靠 self.last，不会重复推送。
+        GLib.timeout_add_seconds(1, self._poll)
+
+    def _poll(self):
+        try:
+            self.cb.request_text(self._on_text)
+        except Exception:
+            pass
+        return True
 
     def _on_change(self, cb, event):
         cb.request_text(self._on_text)
@@ -151,23 +164,35 @@ class Pusher:
             return
         if text == self.last:
             return
-        self.last = text
         preview = " ".join(text.split())[:40]
+        # 手机没连上：不更新 self.last，等重连后这条内容还能自动补推
         if not phone_connected():
-            log(f"跳过（手机未连接）: {preview!r}")
+            if text != self.pending_logged:
+                log(f"跳过（手机未连接）: {preview!r}")
+                self.pending_logged = text
+            return
+        self.pending_logged = None
+        # 推送失败后 30 秒内不反复重试，避免刷日志
+        if time.time() - self.last_attempt < 30 and getattr(self, "_last_failed_text", None) == text:
             return
         if self.mode == "safe":
             ok, why = safe_to_push()
             if not ok:
                 log(f"跳过（{why}）: {preview!r}")
+                self.last = text   # safe 模式跳过算处理过，避免轮询反复判断
                 return
             reason = why
         else:
             reason = "always 模式"
         ok, msg = push(text)
         if ok:
+            self.last = text
+            self.last_attempt = 0.0
+            self._last_failed_text = None
             log(f"✓ 已推送到 {msg}（{reason}）: {preview!r}")
         else:
+            self.last_attempt = time.time()
+            self._last_failed_text = text
             log(f"✗ 推送失败: {msg}")
 
 
